@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PraiseFlow Pro - 듀얼 모니터 시스템</title>
+    <!-- 라이브러리 로드 -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- 글로벌 외부 네트워크 실시간 펍섭용 MQTT 클라이언트 로드 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js" type="text/javascript"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;700;900&display=swap" rel="stylesheet">
+
+    <style>
+        :root { --primary: #c084fc; --secondary: #22c55e; --bg: #0b0b0f; --card-bg: #18181b; --text-main: #fafafa; --text-dim: #71717a; --border: #27272a; --danger: #ef4444; }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Pretendard', sans-serif; }
+        body { background-color: var(--bg); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
+        
+        #loader { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10000; }
+        .spinner { width: 40px; height: 40px; border: 4px solid rgba(192, 132, 252, 0.1); border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .app-container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        .tabs { display: flex; gap: 1rem; margin-bottom: 2rem; background: var(--card-bg); padding: 0.5rem; border-radius: 12px; border: 1px solid var(--border); }
+        .tab { flex: 1; padding: 1rem; text-align: center; cursor: pointer; border-radius: 8px; font-weight: 700; transition: 0.3s; color: var(--text-dim); }
+        .tab.active { background: var(--primary); color: white; }
+        
+        .slots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
+        .slot-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 24px; padding: 1.5rem; position: relative; transition: 0.3s; min-height: 180px; border-style: dashed; display: flex; flex-direction: column; }
+        .slot-card.filled { border-style: solid; border-color: var(--primary); background: rgba(192, 132, 252, 0.05); }
+        .slot-bg-preview { position: absolute; inset: 0; opacity: 0.2; background-size: cover; background-position: center; pointer-events: none; }
+        
+        .preview-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+        .preview-item { background: rgba(255,255,255,0.03); padding: 10px; border-radius: 10px; font-size: 0.85rem; cursor: pointer; border: 1px solid transparent; transition: 0.2s; }
+        .preview-item:hover { background: rgba(255,255,255,0.1); border-color: var(--primary); }
+        .preview-item.active { border-color: var(--secondary); background: rgba(34, 197, 94, 0.2); box-shadow: 0 0 15px rgba(34, 197, 94, 0.1); transform: scale(1.02); }
+
+        .present-layer { position: fixed; inset: 0; background: black; z-index: 9999; cursor: none; }
+        .p-bg { position: absolute; inset: 0; background-size: cover; background-position: center; transition: 1s cubic-bezier(0.4, 0, 0.2, 1); }
+        .p-dim { position: absolute; inset: 0; background: rgba(0,0,0,0.5); }
+        .p-content { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; padding: 5vw; }
+        .p-lyrics { font-size: 9vh; font-weight: 900; color: #ffff00; text-shadow: 4px 4px 20px black; text-align: center; line-height: 1.4; white-space: pre-wrap; }
+        .p-title { font-size: 12vh; font-weight: 900; color: white; text-shadow: 4px 4px 25px black; text-align: center; }
+
+        .fullscreen-prompt { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 10001; display: flex; align-items: center; justify-content: center; cursor: pointer; color: white; flex-direction: column; gap: 20px; }
+        
+        .btn { padding: 0.8rem 1.2rem; border-radius: 12px; border: none; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 0.5rem; transition: 0.3s; }
+        .btn-primary { background: var(--primary); color: white; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 5000; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+        .modal-box { background: var(--card-bg); border: 1px solid var(--border); border-radius: 30px; padding: 2rem; width: 100%; max-width: 500px; max-height: 80vh; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div id="loader"><div class="spinner"></div></div>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        const DEFAULT_THEMES = [
+            { id: 'forest', name: '숲속', url: 'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?q=80&w=2560' },
+            { id: 'spring', name: '봄', url: 'https://images.unsplash.com/photo-1490750967868-88aa4486c946?q=80&w=2670' },
+            { id: 'summer', name: '여름', url: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2673' },
+            { id: 'autumn', name: '가을 숲', url: 'https://images.unsplash.com/photo-1473448912268-2022ce9509d8?q=80&w=2000' },
+            { id: 'winter', name: '겨울(설경)', url: 'https://images.unsplash.com/photo-1483921020237-2ff51e8e4b22?q=80&w=2000' },
+            { id: 'christmas', name: '성탄절', url: 'https://images.unsplash.com/photo-1543589923-78e35f728335?q=80&w=2000' }
+        ];
+
+        // UTF-8 대응 데이터 인코딩 (JSON -> Base64)
+        const encodeShareData = (data) => {
+            try {
+                // 데이터 용량 최소화를 위해 핵심 정보만 필터링
+                const cleaned = data.map(slot => {
+                    if (!slot) return null;
+                    return {
+                        song: {
+                            title: slot.song.title,
+                            lyrics: slot.song.lyrics
+                        },
+                        themeUrl: slot.themeUrl
+                    };
+                });
+                const jsonStr = JSON.stringify(cleaned);
+                return btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g, (match, p1) => {
+                    return String.fromCharCode(parseInt(p1, 16));
+                }));
+            } catch (e) {
+                console.error("인코딩 실패:", e);
+                return '';
+            }
+        };
+
+        // UTF-8 대응 데이터 디코딩 (Base64 -> JSON)
+        const decodeShareData = (str) => {
+            try {
+                if (!str) return [];
+                const decoded = decodeURIComponent(atob(str).split('').map((c) => {
+                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                }).join(''));
+                return JSON.parse(decoded);
+            } catch (e) {
+                console.error("디코딩 실패:", e);
+                return [];
+            }
+        };
+
+        const bc = new BroadcastChannel('praise_flow_sync');
+
+        const App = () => {
+            const [mode] = useState(() => new URLSearchParams(window.location.search).get('mode') || 'controller');
+            const [view, setView] = useState('planner');
+            const [toastMsg, setToastMsg] = useState('');
+
+            // 외부 송출창 연동 상태 (체크 안하면 한 화면에서 조작 및 모니터링 수행)
+            const [externalPresent, setExternalPresent] = useState(false);
+            
+            // 외부 송출창 팝업 윈도우 인스턴스 보관 상태 (단일 화면 시 강제 자동 닫기를 위해 보관)
+            const [presenterWindow, setPresenterWindow] = useState(null);
+
+            // 최신 상태를 리스너 클로저 문제 없이 즉시 조회하기 위한 useRef 보관 (로컬 file:// 통신 및 팝업 연동용)
+            const liveSlideRef = React.useRef(null);
+            const activePointerRef = React.useRef({ slotIdx: -1, blockIdx: -1 });
+
+            // 화면 크기를 실시간으로 추적하여 모바일 기기 여부 감지 (세로 최적화 반응형 뷰어 구현용)
+            const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
+
+            useEffect(() => {
+                const handleResize = () => {
+                    setIsMobile(window.innerWidth < 768);
+                };
+                window.addEventListener('resize', handleResize);
+                return () => window.removeEventListener('resize', handleResize);
+            }, []);
+
+            // 외부 실시간 동기화를 위한 글로벌 웹소켓 채널 ID (주소창 &channel=... 에서 파싱하거나 신규 생성)
+            const [channelId] = useState(() => {
+                const urlParams = new URLSearchParams(window.location.search);
+                return urlParams.get('channel') || ('pf_' + Math.random().toString(36).substring(2, 11));
+            });
+            // MQTT 클라이언트 객체 보관용 Ref
+            const mqttClientRef = React.useRef(null);
+
+            // 글로벌 외부 네트워크 (LTE / 5G / 타지 Wi-Fi 등) 실시간 동기화용 MQTT WebSocket 커넥션 클라이언트 가동
+            useEffect(() => {
+                if (!window.Paho) {
+                    console.warn("MQTT Paho 라이브러리가 로드되지 않았습니다. 글로벌 실시간 싱크가 작동하지 않습니다.");
+                    return;
+                }
+
+                const clientId = 'client_' + Math.random().toString(36).substring(2, 11);
+                // HiveMQ 글로벌 공용 브로커에 암호화 웹소켓(wss)을 통해 보안 접속 처리 (포트 8884)
+                const client = new window.Paho.MQTT.Client('broker.hivemq.com', 8884, '/mqtt', clientId);
+                mqttClientRef.current = client;
+
+                client.onConnectionLost = (responseObject) => {
+                    if (responseObject.errorCode !== 0) {
+                        console.warn("글로벌 동기화 채널 연결 유실. 재접속 대기:", responseObject.errorMessage);
+                        // 5초 후 자동 재접속 시도 (안정성 극대화)
+                        setTimeout(() => {
+                            try {
+                                if (mqttClientRef.current && !mqttClientRef.current.isConnected()) {
+                                    mqttClientRef.current.connect(connectOptions);
+                                }
+                            } catch (e) {}
+                        }, 5000);
+                    }
+                };
+
+                client.onMessageArrived = (message) => {
+                    try {
+                        const packet = JSON.parse(message.payloadString);
+                        // 외부망을 통해 뷰어 모바일 기기들에게 신호가 도착하면, 실시간으로 가사 화면 갱신 수행
+                        if (mode === 'viewer') {
+                            if (packet.type === 'UPDATE_SLIDE') {
+                                setLiveSlide(packet.payload);
+                            }
+                            if (packet.type === 'UPDATE_POINTER') {
+                                setActivePointer(packet.payload);
+                            }
+                        }
+                    } catch (e) {
+                        console.error("수신 패킷 분석 오류:", e);
+                    }
+                };
+
+                const connectOptions = {
+                    useSSL: true,
+                    timeout: 3,
+                    keepAliveInterval: 30,
+                    onSuccess: () => {
+                        console.log("글로벌 실시간 동기화 채널 접속 완료. 채널 방 ID:", channelId);
+                        client.subscribe(`praiseflow/sync/${channelId}`);
+                    },
+                    onFailure: (err) => {
+                        console.error("글로벌 동기화 채널 접속 실패. 10초 후 재시도:", err);
+                        setTimeout(() => {
+                            try {
+                                if (mqttClientRef.current && !mqttClientRef.current.isConnected()) {
+                                    mqttClientRef.current.connect(connectOptions);
+                                }
+                            } catch (e) {}
+                        }, 10000);
+                    }
+                };
+
+                client.connect(connectOptions);
+
+                return () => {
+                    try {
+                        if (client.isConnected()) {
+                            client.disconnect();
+                        }
+                    } catch (e) {}
+                };
+            }, [channelId, mode]);
+
+            // 공유 데이터를 URL 파라미터에서 먼저 디코딩
+            const [shareData] = useState(() => {
+                if (mode === 'viewer') {
+                    const shareParam = new URLSearchParams(window.location.search).get('share');
+                    return decodeShareData(shareParam);
+                }
+                return null;
+            });
+
+            const [library, setLibrary] = useState(() => JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}'));
+            const [themes] = useState(() => JSON.parse(localStorage.getItem('praise_themes') || JSON.stringify(DEFAULT_THEMES)));
+            
+            // 뷰어 모드일 때는 공유받은 데이터를 상태로 사용, 평소에는 로컬 스토리지 데이터 사용
+            const [slots, setSlots] = useState(() => {
+                if (mode === 'viewer' && shareData) {
+                    return shareData;
+                }
+                return JSON.parse(localStorage.getItem('praise_flow_slots') || '[]');
+            });
+
+            const [activePointer, setActivePointerState] = useState({ slotIdx: -1, blockIdx: -1 });
+            const [liveSlide, setLiveSlideState] = useState({ text: '', title: '', themeUrl: DEFAULT_THEMES[0].url, isTitle: false });
+            
+            const setActivePointer = (val) => {
+                activePointerRef.current = val;
+                setActivePointerState(val);
+            };
+
+            const setLiveSlide = (val) => {
+                liveSlideRef.current = val;
+                setLiveSlideState(val);
+            };
+
+            const [targetSlotIdx, setTargetSlotIdx] = useState(null);
+            const [themeSelectorIdx, setThemeSelectorIdx] = useState(null);
+            const [isFullscreen, setIsFullscreen] = useState(false);
+
+            const showToast = (msg) => {
+                setToastMsg(msg);
+                setTimeout(() => setToastMsg(''), 3000);
+            };
+
+            // 뷰어 모드가 아닐 때만 로컬 스토리지에 자동 저장 (방문자의 로컬 스토리지 데이터 보호)
+            useEffect(() => {
+                if (mode !== 'viewer') {
+                    localStorage.setItem('praise_flow_f_db', JSON.stringify(library));
+                    localStorage.setItem('praise_flow_slots', JSON.stringify(slots));
+                }
+                const loader = document.getElementById('loader');
+                if (loader) loader.style.display = 'none';
+                if (window.lucide) window.lucide.createIcons();
+            }, [library, slots, mode]);
+
+            // 팝업창이 사용자에 의해 직접 닫혔는지 주기적으로 감시하여 체크박스 상태와 동기화하는 백업 루프
+            useEffect(() => {
+                if (mode === 'controller') {
+                    const timer = setInterval(() => {
+                        if (externalPresent && presenterWindow && presenterWindow.closed) {
+                            setExternalPresent(false);
+                            setPresenterWindow(null);
+                            showToast("🔌 외부 송출창이 사용자에 의해 직접 닫혔습니다.");
+                        }
+                    }, 1000);
+                    return () => clearInterval(timer);
+                }
+            }, [mode, externalPresent, presenterWindow]);
+
+            // 외부 송출창 연동 스위치가 꺼지면(OFF), 열려 있는 모든 외부 송출 팝업창을 즉시 자동으로 닫아주는 초정밀 감시 안전장치
+            useEffect(() => {
+                if (!externalPresent && presenterWindow) {
+                    try {
+                        if (!presenterWindow.closed) {
+                            presenterWindow.close();
+                            showToast("🔌 외부 송출 팝업창을 안전하게 자동 닫기 하였습니다.");
+                        }
+                    } catch (e) {
+                        console.error("외부 송출 팝업 종료 실패:", e);
+                    }
+                    setPresenterWindow(null);
+                }
+            }, [externalPresent, presenterWindow]);
+
+            // 부모-자식 창 간의 Direct Window Control API 전역 등록 (로컬 file:// 통신 완벽 지원용)
+            useEffect(() => {
+                if (mode === 'presenter') {
+                    // 자식창(팝업창)에 부모가 직접 상태를 주입할 수 있도록 전역 함수 노출
+                    window.updateSlideDirect = (slideData) => {
+                        setLiveSlide(slideData);
+                    };
+                    window.updatePointerDirect = (pointer) => {
+                        setActivePointer(pointer);
+                    };
+                    
+                    // 최초 로드 시, 혹시 부모창(opener)이 살아있다면 즉각 최신 상태 직접 끌어오기 (핸드셰이크 백업)
+                    if (window.opener) {
+                        try {
+                            if (window.opener.getLiveStateDirect) {
+                                const parentState = window.opener.getLiveStateDirect();
+                                if (parentState && parentState.liveSlide) {
+                                    setLiveSlide(parentState.liveSlide);
+                                }
+                                if (parentState && parentState.activePointer) {
+                                    setActivePointer(parentState.activePointer);
+                                }
+                            }
+                        } catch (e) {
+                            console.warn("opener 상태 직접 획득 실패 (Same-Origin Policy 제한 등):", e);
+                        }
+                    }
+                } else if (mode === 'controller') {
+                    // 부모창(컨트롤러)에 자식이 언제든 최신 상태를 요청해 읽어갈 수 있도록 전역 함수 노출
+                    window.getLiveStateDirect = () => {
+                        return {
+                            liveSlide: liveSlideRef.current,
+                            activePointer: activePointerRef.current
+                        };
+                    };
+                }
+
+                return () => {
+                    delete window.updateSlideDirect;
+                    delete window.updatePointerDirect;
+                    delete window.getLiveStateDirect;
+                };
+            }, [mode]);
+
+            // 브로드캐스트 채널 연동 (Ref를 활용하여 상태 변화 시 리스너 갱신 없이 상시 일정한 대기 유지)
+            useEffect(() => {
+                bc.onmessage = (e) => {
+                    if (e.data.type === 'UPDATE_SLIDE') setLiveSlide(e.data.payload);
+                    if (e.data.type === 'UPDATE_POINTER') setActivePointer(e.data.payload);
+                    
+                    // 외부 송출창이 최초 가동되어 상태를 요청하면 (최신 Ref 데이터를 안전하게 전송)
+                    if (e.data.type === 'REQUEST_ACTIVE_SLIDE' && mode === 'controller') {
+                        bc.postMessage({ type: 'UPDATE_SLIDE', payload: liveSlideRef.current });
+                        bc.postMessage({ type: 'UPDATE_POINTER', payload: activePointerRef.current });
+                    }
+                };
+
+                // 클린업 함수
+                return () => {
+                    bc.onmessage = null;
+                };
+            }, [mode]);
+
+            // 외부 송출창이 최초로 켜지는 순간 컨트롤러에 즉시 상태 동기화 요청 (BroadcastChannel 핸드셰이크 트리거)
+            useEffect(() => {
+                if (mode === 'presenter') {
+                    bc.postMessage({ type: 'REQUEST_ACTIVE_SLIDE' });
+                }
+            }, [mode]);
+
+            // 뷰어 모드이거나, 최초 마운트되어 포인터가 지정되지 않은 초기 상태(slotIdx === -1)일 때만 첫 찬양을 자동 렌더링
+            useEffect(() => {
+                if (slots && slots.length > 0 && activePointer.slotIdx === -1) {
+                    const firstValidIdx = slots.findIndex(s => s !== null);
+                    if (firstValidIdx !== -1) {
+                        const firstSlot = slots[firstValidIdx];
+                        setLiveSlide({ title: firstSlot.song.title, isTitle: true, themeUrl: firstSlot.themeUrl });
+                        setActivePointer({ slotIdx: firstValidIdx, blockIdx: 0 });
+                    }
+                }
+            }, [slots, activePointer.slotIdx]);
+
+            const sendToScreen = (slideData, pointer) => {
+                setLiveSlide(slideData);
+                setActivePointer(pointer);
+                
+                // 1. BroadcastChannel을 활용하여 일반적인 웹 브라우저 탭 간 송출 수행
+                bc.postMessage({ type: 'UPDATE_SLIDE', payload: slideData });
+                bc.postMessage({ type: 'UPDATE_POINTER', payload: pointer });
+
+                // 2. Direct Reference 제어 (로컬 file:// 실행 등 브로드캐스트가 차단되는 보안 환경 대비 Failsafe)
+                if (presenterWindow && !presenterWindow.closed) {
+                    try {
+                        if (presenterWindow.updateSlideDirect) {
+                            presenterWindow.updateSlideDirect(slideData);
+                        }
+                        if (presenterWindow.updatePointerDirect) {
+                            presenterWindow.updatePointerDirect(pointer);
+                        }
+                    } catch (e) {
+                        console.warn("자식 창 직접 제어 중 오류 (Same-Origin Policy 제한 등):", e);
+                    }
+                }
+
+                // 3. 글로벌 MQTT WebSocket 서버 발행 (외부 네트워크 3G/LTE/5G의 다수 모바일 기기용 실시간 중계)
+                if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
+                    try {
+                        const sendPacket = (type, payload) => {
+                            const message = new window.Paho.MQTT.Message(JSON.stringify({ type, payload }));
+                            message.destinationName = `praiseflow/sync/${channelId}`;
+                            mqttClientRef.current.send(message);
+                        };
+                        sendPacket('UPDATE_SLIDE', slideData);
+                        sendPacket('UPDATE_POINTER', pointer);
+                    } catch (e) {
+                        console.error("글로벌 웹소켓 송출 실패:", e);
+                    }
+                }
+            };
+
+            const navigate = useCallback((direction) => {
+                if (activePointer.slotIdx === -1) return;
+
+                const currentSlot = slots[activePointer.slotIdx];
+                if (!currentSlot) return;
+
+                const blocks = (currentSlot.song.lyrics || '').split(/\n\s*\n/).filter(x => x.trim());
+                let nextSlotIdx = activePointer.slotIdx;
+                let nextBlockIdx = activePointer.blockIdx + direction;
+
+                if (nextBlockIdx < 0) {
+                    nextSlotIdx--;
+                    while (nextSlotIdx >= 0 && !slots[nextSlotIdx]) nextSlotIdx--;
+                    if (nextSlotIdx >= 0) {
+                        const prevBlocks = (slots[nextSlotIdx].song.lyrics || '').split(/\n\s*\n/).filter(x => x.trim());
+                        nextBlockIdx = prevBlocks.length;
+                    } else {
+                        return;
+                    }
+                } else if (nextBlockIdx > blocks.length) {
+                    nextSlotIdx++;
+                    while (nextSlotIdx < slots.length && !slots[nextSlotIdx]) nextSlotIdx++;
+                    if (nextSlotIdx < slots.length) {
+                        nextBlockIdx = 0;
+                    } else {
+                        return;
+                    }
+                }
+
+                const targetSlot = slots[nextSlotIdx];
+                const targetBlocks = (targetSlot.song.lyrics || '').split(/\n\s*\n/).filter(x => x.trim());
+                
+                if (nextBlockIdx === 0) {
+                    sendToScreen({ title: targetSlot.song.title, isTitle: true, themeUrl: targetSlot.themeUrl }, { slotIdx: nextSlotIdx, blockIdx: 0 });
+                } else {
+                    const text = targetBlocks[nextBlockIdx - 1];
+                    sendToScreen({ text: text.trim(), themeUrl: targetSlot.themeUrl, isTitle: false }, { slotIdx: nextSlotIdx, blockIdx: nextBlockIdx });
+                }
+            }, [activePointer, slots, externalPresent]);
+
+            // 키보드 조작 연동
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if (view !== 'planner' && mode !== 'viewer') return;
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+                    if (e.key === 'ArrowRight' || e.key === ' ') {
+                        e.preventDefault();
+                        navigate(1);
+                    } else if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        navigate(-1);
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [navigate, view, mode]);
+
+            // 전체화면 제어
+            useEffect(() => {
+                const handleFsChange = () => {
+                    setIsFullscreen(!!document.fullscreenElement);
+                };
+                document.addEventListener('fullscreenchange', handleFsChange);
+                return () => document.removeEventListener('fullscreenchange', handleFsChange);
+            }, []);
+
+            const toggleFullscreen = () => {
+                const doc = document.documentElement;
+                if (!document.fullscreenElement) {
+                    if (doc.requestFullscreen) doc.requestFullscreen().catch(e => console.error("FS Error", e));
+                } else {
+                    if (document.exitFullscreen) document.exitFullscreen();
+                }
+            };
+
+            // 외부 송출창 안전 오픈 및 상태 보관 핸들러
+            const handleOpenPresenter = () => {
+                if (presenterWindow && !presenterWindow.closed) {
+                    presenterWindow.focus();
+                    return;
+                }
+                const win = window.open('?mode=presenter', 'PraiseFlowPresenter', 'width=1280,height=720');
+                setPresenterWindow(win);
+                showToast("🖥️ 외부 송출 팝업창을 가동했습니다. 세컨드 모니터로 이동시켜주세요.");
+            };
+
+            // 공유 링크 생성 및 복사
+            const handleShareLink = () => {
+                const hasValidSlot = slots.some(s => s !== null);
+                if (!hasValidSlot) {
+                    alert("공유할 찬양 순서가 비어 있습니다. 먼저 찬양 곡을 추가해 주세요!");
+                    return;
+                }
+                const encoded = encodeShareData(slots);
+                // 모바일용 글로벌 실시간 싱크를 위해 채널 식별자(&channel=...)를 복사 링크 꼬리에 덧붙여 제공
+                const shareUrl = `${window.location.origin}${window.location.pathname}?mode=viewer&share=${encoded}&channel=${channelId}`;
+                
+                navigator.clipboard.writeText(shareUrl).then(() => {
+                    showToast("🔗 뷰어 공유 링크가 복사되었습니다!");
+                }).catch(err => {
+                    console.error("복사 실패", err);
+                    alert("링크 복사 중 오류가 발생했습니다. 수동으로 복사해 주세요:\n" + shareUrl);
+                });
+            };
+
+            // PPT 송출 모드 (Presenter) 렌더링
+            if (mode === 'presenter') {
+                return (
+                    <div className="present-layer" style={{ cursor: isFullscreen ? 'none' : 'default', position: 'fixed', inset: 0, background: 'black', overflow: 'hidden' }} onClick={toggleFullscreen}>
+                        {/* 전체화면이 아닐 때만 띄우는 스마트하고 세련된 우측 상단 플로팅 안내 배너 (가사를 절대 가리지 않음) */}
+                        {!isFullscreen && (
+                            <div style={{
+                                position: 'fixed', top: '20px', right: '20px', zIndex: 10001,
+                                background: 'rgba(24, 24, 27, 0.8)', backdropFilter: 'blur(12px)',
+                                border: '1px solid rgba(192, 132, 252, 0.3)', padding: '12px 20px',
+                                borderRadius: '16px', display: 'flex', alignItems: 'center', gap: '10px',
+                                boxShadow: '0 10px 30px rgba(0,0,0,0.5)', pointerEvents: 'none',
+                                animation: 'spin 0s linear, bounce 2s infinite'
+                            }}>
+                                <i data-lucide="maximize" style={{ width: 16, height: 16, color: 'var(--primary)' }}></i>
+                                <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'white' }}>
+                                    화면을 클릭하면 깔끔한 전체화면으로 바뀝니다.
+                                </span>
+                            </div>
+                        )}
+                        {isFullscreen && (
+                            <div style={{ position: 'fixed', top: '15px', right: '15px', zIndex: 10002, opacity: 0.1 }} onMouseEnter={e => e.currentTarget.style.opacity = 0.8} onMouseLeave={e => e.currentTarget.style.opacity = 0.1}>
+                                <button className="btn btn-outline" onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }} style={{ padding: '6px 12px', fontSize: '11px', background: 'rgba(0,0,0,0.6)', color: 'white', border: '1px solid rgba(255,255,255,0.2)' }}>
+                                    전체화면 종료 (Esc)
+                                </button>
+                            </div>
+                        )}
+                        <div className="p-bg" style={{backgroundImage:`url(${liveSlide.themeUrl})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center', transition: '1s cubic-bezier(0.4, 0, 0.2, 1)' }}></div>
+                        <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
+                        <div className="p-content" style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '5vw' }}>
+                            {liveSlide.isTitle ? (
+                                <h1 className="p-title" style={{ fontSize: '10vh', fontWeight: 900, color: 'white', textShadow: '4px 4px 25px black', textAlign: 'center', margin: 0 }}>
+                                    {liveSlide.title || liveSlide.text}
+                                </h1>
+                            ) : (
+                                <div className="p-lyrics" style={{ fontSize: '7.5vh', fontWeight: 900, color: '#ffff00', textShadow: '4px 4px 20px black', textAlign: 'center', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>
+                                    {liveSlide.text || '대기 중...'}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            // 🔒 [읽기 전용] 뷰어 및 모바일 최적화 모드 렌더링
+            if (mode === 'viewer') {
+                return (
+                    <div className="app-container" style={{ maxWidth: '100%', padding: isMobile ? '0.75rem' : '1.5rem 2rem' }}>
+                        {toastMsg && (
+                            <div style={{
+                                position: 'fixed', bottom: '20px', left: '50%', transform: 'translateX(-50%)',
+                                background: 'rgba(192, 132, 252, 0.95)', color: 'white', padding: '12px 24px',
+                                borderRadius: '30px', fontWeight: 900, boxShadow: '0 10px 30px rgba(192, 132, 252, 0.4)',
+                                zIndex: 99999, display: 'flex', alignItems: 'center', gap: '8px',
+                                backdropFilter: 'blur(5px)', border: '1px solid rgba(255,255,255,0.2)'
+                            }}>
+                                <i data-lucide="check-circle" style={{ width: 18, height: 18 }}></i>
+                                {toastMsg}
+                            </div>
+                        )}
+
+                        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '12px' : '20px', borderBottom: '1px solid var(--border)', paddingBottom: '12px', flexWrap: 'wrap', gap: '10px' }}>
+                            <h1 style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: isMobile ? '1.2rem' : '1.5rem' }}>
+                                <i data-lucide="music" style={{ color: 'var(--primary)' }}></i> PraiseFlow <span style={{ fontSize: '0.7rem', background: 'rgba(192,132,252,0.15)', color: 'var(--primary)', padding: '2px 6px', borderRadius: '8px', fontWeight: 900 }}>VIEWER</span>
+                            </h1>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <i data-lucide="smartphone" style={{ width: 12 }}></i> 모바일 연동 뷰어
+                            </span>
+                        </header>
+
+                        <div className="slots-grid" style={{ display: 'flex', gap: isMobile ? '1rem' : '2rem', flexDirection: isMobile ? 'column' : 'row', alignItems: 'flex-start' }}>
+                            
+                            {/* [모바일 전용 레이아웃 분기]: 모바일일 때는 실시간 프리뷰가 스크린 상단에 Sticky(고정)되어 아래 목록 스크롤 시에도 상시 모니터링이 가능하게 함 */}
+                            {isMobile && (
+                                <div style={{
+                                    position: 'sticky', top: '0px', zIndex: 1000, width: '100%',
+                                    background: 'var(--bg)', paddingBottom: '10px', borderBottom: '1px solid var(--border)'
+                                }}>
+                                    <div style={{
+                                        position: 'relative', background: 'black', borderRadius: '16px', overflow: 'hidden',
+                                        border: '2px solid var(--primary)', boxShadow: '0 10px 25px rgba(192, 132, 252, 0.15)',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center', aspectRatio: '16/9', width: '100%'
+                                    }}>
+                                        <div className="p-bg" style={{ backgroundImage: `url(${liveSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
+                                        <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
+                                        
+                                        <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '1rem', textAlign: 'center' }}>
+                                            {liveSlide.isTitle ? (
+                                                <h1 className="p-title" style={{ fontSize: '7vw', color: 'white', textShadow: '2px 2px 10px black', margin: 0 }}>{liveSlide.title || liveSlide.text}</h1>
+                                            ) : (
+                                                <div className="p-lyrics" style={{ fontSize: '6vw', color: '#ffff00', textShadow: '2px 2px 10px black', fontWeight: 900, whiteSpace: 'pre-wrap', lineHeight: 1.3 }}>
+                                                    {liveSlide.text || '순서 목록에서 가사를 터치하세요.'}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    
+                                    {/* 장갑 끼고도 조작 가능한 65px 높이의 큼직한 풀 스팬 터치 제어 버튼판 */}
+                                    <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                                        <button className="btn" style={{ flex: 1, height: '65px', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'white', fontSize: '1.1rem', fontWeight: 900, borderRadius: '14px' }} onClick={() => navigate(-1)}>
+                                            <i data-lucide="chevron-left" style={{ width: 22, height: 22, marginRight: 4 }}></i> 이전 (←)
+                                        </button>
+                                        <button className="btn btn-primary" style={{ flex: 1, height: '65px', fontSize: '1.1rem', fontWeight: 900, background: 'var(--primary)', borderRadius: '14px', boxShadow: '0 8px 20px rgba(192, 132, 252, 0.3)' }} onClick={() => navigate(1)}>
+                                            다음 (→) <i data-lucide="chevron-right" style={{ width: 22, height: 22, marginLeft: 4 }}></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* [순서 목록 영역]: 모바일일 때는 스크롤이 자연스럽게 하단에 나열됨 */}
+                            <div style={{
+                                flex: '1 1 350px', width: '100%', display: 'flex', flexDirection: 'column', gap: '1rem',
+                                overflowY: isMobile ? 'visible' : 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 150px)', paddingRight: '5px'
+                            }}>
+                                <h2 style={{ fontSize: '1.1rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: 6, borderBottom: '1px solid var(--border)', paddingBottom: 8, fontWeight: 900 }}>
+                                    <i data-lucide="list-music" style={{ width: 18 }}></i> 찬양 순서 가사 목록
+                                </h2>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                    {slots.map((item, i) => {
+                                        if (!item) return null;
+                                        const itemBlocks = (item.song.lyrics || '').split(/\n\s*\n/).filter(x => x.trim());
+                                        return (
+                                            <div key={i} className="slot-card filled" style={{ padding: '12px 18px', minHeight: 'auto', cursor: 'default', background: 'rgba(192,132,252,0.02)', position: 'relative', overflow: 'hidden', borderRadius: '16px' }}>
+                                                <div className="slot-bg-preview" style={{ backgroundImage: `url(${item.themeUrl})`, opacity: 0.1 }}></div>
+                                                <div style={{ position: 'relative', zIndex: 2 }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                        <span style={{ fontSize: '0.75rem', opacity: 0.7, fontWeight: 800, color: 'var(--primary)' }}>
+                                                            {["오프닝 1", "오프닝 2", "오프닝 3", "성찬/특별", "말씀전", "마지막"][i]}
+                                                        </span>
+                                                        <span style={{ fontSize: '0.9rem', fontWeight: 900, color: 'white' }}>{item.song.title}</span>
+                                                    </div>
+                                                    <div className="preview-list">
+                                                        <div className={`preview-item ${activePointer.slotIdx === i && activePointer.blockIdx === 0 && 'active'}`} 
+                                                             style={{ padding: '12px', fontSize: '0.9rem', borderRadius: '10px', fontWeight: 700 }}
+                                                             onClick={() => sendToScreen({ title: item.song.title, isTitle: true, themeUrl: item.themeUrl }, { slotIdx: i, blockIdx: 0 })}>
+                                                            📢 [곡 시작 제목] {item.song.title}
+                                                        </div>
+                                                        {itemBlocks.map((block, bidx) => (
+                                                            <div key={bidx} 
+                                                                 className={`preview-item ${activePointer.slotIdx === i && activePointer.blockIdx === bidx + 1 && 'active'}`} 
+                                                                 style={{ padding: '12px', fontSize: '0.9rem', borderRadius: '10px', fontWeight: 700, lineHeight: 1.4 }}
+                                                                 onClick={() => sendToScreen({ text: block.trim(), themeUrl: item.themeUrl, isTitle: false }, { slotIdx: i, blockIdx: bidx + 1 })}>
+                                                                🎵 {bidx + 1}절: {block.split('\n')[0]}...
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                    {slots.every(s => s === null) && (
+                                        <div style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '40px 0' }}>
+                                            <i data-lucide="info" style={{ width: 40, height: 40, margin: '0 auto 10px', display: 'block', opacity: 0.5 }}></i>
+                                            등록된 찬양이 없습니다.
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* [데스크톱 전용 실시간 가사 화면 영역]: 화면이 넓을 때만 우측에 크게 보여줌 */}
+                            {!isMobile && (
+                                <div style={{ flex: '2 1 500px', display: 'flex', flexDirection: 'column', gap: '1rem', minHeight: '400px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <h2 style={{ fontSize: '1.1rem', color: 'var(--secondary)', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 900 }}>
+                                            <i data-lucide="play" style={{ width: 18, color: 'var(--secondary)' }}></i> 실시간 가사 화면 (프리뷰)
+                                        </h2>
+                                        <button className="btn" style={{ padding: '6px 14px', fontSize: '0.75rem', background: 'var(--card-bg)', border: '1px solid var(--border)', color: 'white' }} onClick={toggleFullscreen}>
+                                            <i data-lucide="maximize-2" style={{ width: 12, marginRight: 4 }}></i> 전체화면 띄우기
+                                        </button>
+                                    </div>
+
+                                    <div style={{
+                                        flex: 1, position: 'relative', background: 'black', borderRadius: '24px', overflow: 'hidden',
+                                        border: '2px solid var(--border)', boxShadow: '0 20px 40px rgba(0,0,0,0.5)', display: 'flex',
+                                        alignItems: 'center', justifyContent: 'center', minHeight: '320px'
+                                    }}>
+                                        <div className="p-bg" style={{ backgroundImage: `url(${liveSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
+                                        <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
+                                        
+                                        <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '2rem', textAlign: 'center' }}>
+                                            {liveSlide.isTitle ? (
+                                                <h1 className="p-title" style={{ fontSize: '4.5vw', color: 'white', textShadow: '2px 2px 15px black', margin: 0 }}>{liveSlide.title || liveSlide.text}</h1>
+                                            ) : (
+                                                <div className="p-lyrics" style={{ fontSize: '3.5vw', color: '#ffff00', textShadow: '2px 2px 15px black', fontWeight: 900, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                                                    {liveSlide.text || '왼쪽 목록에서 가사 슬라이드를 선택해 주세요.'}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* 데스크톱용 제어 버튼 */}
+                                    <div style={{ display: 'flex', gap: '15px', marginTop: '5px' }}>
+                                        <button className="btn" style={{ flex: 1, height: '55px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', color: 'white', fontSize: '1rem' }} onClick={() => navigate(-1)}>
+                                            <i data-lucide="chevron-left"></i> 이전 가사 (←)
+                                        </button>
+                                        <button className="btn btn-primary" style={{ flex: 1, height: '55px', fontSize: '1rem', background: 'var(--primary)' }} onClick={() => navigate(1)}>
+                                            다음 가사 (Space / →) <i data-lucide="chevron-right"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            // 일반 컨트롤러 모드 렌더링
+            return (
+                <div className="app-container">
+                    {toastMsg && (
+                        <div style={{
+                            position:'fixed', bottom:'20px', left:'50%', transform:'translateX(-50%)',
+                            background:'rgba(192, 132, 252, 0.95)', color:'white', padding:'12px 24px',
+                            borderRadius:'30px', fontWeight:900, boxShadow:'0 10px 30px rgba(192, 132, 252, 0.4)',
+                            zIndex:99999, display:'flex', alignItems:'center', gap:'8px',
+                            backdropFilter:'blur(5px)', border:'1px solid rgba(255,255,255,0.2)'
+                        }}>
+                            <i data-lucide="check-circle" style={{width:18, height:18}}></i>
+                            {toastMsg}
+                        </div>
+                    )}
+
+                    <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
+                        <h1 style={{display:'flex', alignItems:'center', gap:'10px'}}>
+                            <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
+                        </h1>
+                        <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
+                            <button className="btn" style={{background:'#1e1b4b', color:'#c084fc', border:'1px solid #4338ca'}} onClick={handleShareLink}>
+                                <i data-lucide="share-2"></i> 🔗 공유 링크 복사
+                            </button>
+                            <label style={{display:'flex', alignItems:'center', gap:'8px', cursor:'pointer', background:'rgba(255,255,255,0.05)', padding:'8px 16px', borderRadius:'12px', border:'1px solid var(--border)', fontSize:'0.9rem', fontWeight:800}}>
+                                <input type="checkbox" checked={externalPresent} onChange={(e)=>setExternalPresent(e.target.checked)} style={{cursor:'pointer', accentColor:'var(--primary)', width:16, height:16}} />
+                                🖥️ 외부 송출창 연동
+                            </label>
+                            {externalPresent && (
+                                <button className="btn btn-primary" onClick={handleOpenPresenter}>
+                                    <i data-lucide="monitor"></i> 송출창 열기
+                                </button>
+                            )}
+                        </div>
+                    </header>
+
+                    <div className="tabs">
+                        <div className={`tab ${view === 'planner' && 'active'}`} onClick={()=>setView('planner')}>예배 순서</div>
+                        <div className={`tab ${view === 'manager' && 'active'}`} onClick={()=>setView('manager')}>찬양 제작소</div>
+                    </div>
+
+                    {view === 'planner' ? (
+                        <div className="planner-layout" style={{display:'flex', gap:'2rem', flexWrap:'wrap', alignItems:'flex-start'}}>
+                            {/* 좌측: 큐시트 카드 리스트 */}
+                            <div style={{flex:'1 1 550px', display:'flex', flexDirection:'column', gap:'1.5rem'}}>
+                                <h2 style={{fontSize:'1.1rem', color:'var(--primary)', display:'flex', alignItems:'center', gap:6, borderBottom:'1px solid var(--border)', paddingBottom:8, fontWeight:900, marginBottom:'10px'}}>
+                                    <i data-lucide="list-music" style={{width:18}}></i> 예배 순서 조작 큐시트
+                                </h2>
+                                <div className="slots-grid" style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(260px, 1fr))', gap:'1.2rem', width:'100%'}}>
+                                    {[0,1,2,3,4,5].map(i => {
+                                        const item = slots[i];
+                                        const blocks = item ? (item.song.lyrics || '').split(/\n\s*\n/).filter(x => x.trim()) : [];
+                                        return (
+                                            <div key={i} className={`slot-card ${item && 'filled'}`} style={{minHeight:'180px'}}>
+                                                {item && <div className="slot-bg-preview" style={{backgroundImage:`url(${item.themeUrl})`}}></div>}
+                                                <div style={{position:'relative', zIndex:2}}>
+                                                    <div style={{fontSize:'0.7rem', opacity:0.5, fontWeight:800}}>{["오프닝 1", "오프닝 2", "오프닝 3", "성찬/특별", "말씀전", "마지막"][i]}</div>
+                                                    {item ? (
+                                                        <div>
+                                                            <div className="slot-title" style={{fontWeight: 900, marginBottom: 5, fontSize:'0.9rem'}}>{item.song.title}</div>
+                                                            <div style={{display:'flex', gap:5, marginBottom:10}}>
+                                                                <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>setThemeSelectorIdx(i)}>테마</button>
+                                                                <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'var(--danger)', background:'rgba(239,68,68,0.05)', border:'1px solid rgba(239,68,68,0.2)'}} onClick={()=>{const n=[...slots]; n[i]=null; setSlots(n);}}>삭제</button>
+                                                            </div>
+                                                            <div className="preview-list">
+                                                                <div className={`preview-item ${activePointer.slotIdx === i && activePointer.blockIdx === 0 && 'active'}`} 
+                                                                     onClick={()=>sendToScreen({ title: item.song.title, isTitle: true, themeUrl: item.themeUrl }, { slotIdx: i, blockIdx: 0 })}>
+                                                                    [제목] {item.song.title}
+                                                                </div>
+                                                                {blocks.map((block, bidx) => (
+                                                                    <div key={bidx} 
+                                                                         className={`preview-item ${activePointer.slotIdx === i && activePointer.blockIdx === bidx + 1 && 'active'}`} 
+                                                                         onClick={()=>sendToScreen({ text: block.trim(), themeUrl: item.themeUrl, isTitle: false }, { slotIdx: i, blockIdx: bidx + 1 })}>
+                                                                        {block.split('\n')[0]}...
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{textAlign:'center', marginTop:'3rem', cursor:'pointer', fontWeight:700, color:'var(--text-dim)'}} onClick={()=>setTargetSlotIdx(i)}>+ 곡 선택</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            {/* 우측: 실시간 통합 프리뷰 (싱글 모니터 통합 뷰) */}
+                            <div style={{flex:'1 1 350px', display:'flex', flexDirection:'column', gap:'1rem', minHeight:'400px', background:'var(--card-bg)', border:'1px solid var(--border)', padding:'1.5rem', borderRadius:'24px'}}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                    <h2 style={{fontSize:'1.1rem', color:'var(--secondary)', display:'flex', alignItems:'center', gap:6, fontWeight:900}}>
+                                        <i data-lucide="play" style={{width:18, color:'var(--secondary)'}}></i> 실시간 통합 프리뷰
+                                    </h2>
+                                    <button className="btn" style={{padding:'6px 14px', fontSize:'0.75rem', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', color:'white'}} onClick={toggleFullscreen}>
+                                        <i data-lucide="maximize-2" style={{width:12, marginRight:4}}></i> 전체화면
+                                    </button>
+                                </div>
+
+                                <div style={{
+                                    flex:1, position:'relative', background:'black', borderRadius:'20px', overflow:'hidden',
+                                    border:'2px solid var(--border)', boxShadow:'0 15px 30px rgba(0,0,0,0.5)', display:'flex',
+                                    alignItems:'center', justifyContent:'center', minHeight:'240px', aspectRatio:'16/9'
+                                }}>
+                                    <div className="p-bg" style={{backgroundImage:`url(${liveSlide.themeUrl || DEFAULT_THEMES[0].url})`, position:'absolute', inset:0, backgroundSize:'cover', backgroundPosition:'center'}}></div>
+                                    <div className="p-dim" style={{position:'absolute', inset:0, background:'rgba(0,0,0,0.5)'}}></div>
+                                    
+                                    <div className="p-content" style={{position:'relative', zIndex:5, padding:'1rem', textAlign:'center', display:'flex', alignItems:'center', justifyContent:'center', width:'100%', height:'100%'}}>
+                                        {liveSlide.isTitle ? (
+                                            <h1 className="p-title" style={{fontSize:'3vw', color:'white', textShadow:'2px 2px 10px black', margin:0, wordBreak:'break-all'}}>{liveSlide.title || liveSlide.text}</h1>
+                                        ) : (
+                                            <div className="p-lyrics" style={{fontSize:'2.2vw', color:'#ffff00', textShadow:'2px 2px 10px black', fontWeight:900, whiteSpace:'pre-wrap', lineHeight:1.4, wordBreak:'break-all'}}>
+                                                {liveSlide.text || '순서 큐시트에서 가사를 클릭해 주세요.'}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* 가사 제어 네비게이션 */}
+                                <div style={{display:'flex', gap:'12px', marginTop:'5px'}}>
+                                    <button className="btn" style={{flex:1, height:'45px', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', color:'white', fontSize:'0.9rem'}} onClick={()=>navigate(-1)}>
+                                        <i data-lucide="chevron-left"></i> 이전 (←)
+                                    </button>
+                                    <button className="btn btn-primary" style={{flex:1, height:'45px', fontSize:'0.9rem', background:'var(--primary)'}} onClick={()=>navigate(1)}>
+                                        다음 (Space / →) <i data-lucide="chevron-right"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="card" style={{background:'var(--card-bg)', border:'1px solid var(--border)', padding:'2rem', borderRadius:'24px'}}>
+                            <div style={{display:'flex', gap:10, marginBottom:30, flexWrap:'wrap'}}>
+                                <button className="btn btn-outline" style={{flex:1, color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>document.getElementById('import-f').click()}>백업 파일 불러오기</button>
+                                <input type="file" id="import-f" style={{display:'none'}} onChange={(e)=>{
+                                    const file = e.target.files[0];
+                                    if(!file) return;
+                                    const r = new FileReader();
+                                    r.onload = (ev) => {
+                                        const data = JSON.parse(ev.target.result);
+                                        setLibrary(prev => ({...prev, ...data}));
+                                        showToast("📥 라이브러리를 정상적으로 불렀왔습니다!");
+                                    };
+                                    r.readAsText(file);
+                                }} />
+                                <button className="btn btn-outline" style={{flex:1, color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>{
+                                    const blob = new Blob([JSON.stringify(library)], {type:'application/json'});
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a'); a.href = url; a.download='praise_library.json'; a.click();
+                                    showToast("💾 백업 파일 다운로드 완료!");
+                                }}>라이브러리 백업 저장</button>
+                            </div>
+                            <input id="new-title" placeholder="찬양 제목" style={{width:'100%', marginBottom:15, padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white', fontWeight:700}} />
+                            <textarea id="new-lyrics" placeholder="가사를 입력하세요 (빈 줄로 슬라이드 구분)" style={{width:'100%', height:200, padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white', resize:'none'}}></textarea>
+                            <button className="btn btn-primary" style={{width:'100%', marginTop:10}} onClick={()=>{
+                                const t = document.getElementById('new-title').value.trim();
+                                const l = document.getElementById('new-lyrics').value.trim();
+                                if(!t) return alert("제목을 입력하세요.");
+                                setLibrary(prev => ({...prev, [t]: {title:t, lyrics:l}}));
+                                document.getElementById('new-title').value = '';
+                                document.getElementById('new-lyrics').value = '';
+                                showToast("✨ 보관함에 새 찬양이 저장되었습니다!");
+                            }}>보관함에 추가</button>
+
+                            <h3 style={{marginTop:'3rem', marginBottom:15, fontWeight:900}}>보관함 목록 ({Object.keys(library).length})</h3>
+                            <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:'10px'}}>
+                                {Object.keys(library).sort().map(t => (
+                                    <div key={t} className="slot-card" style={{padding:'1rem', borderStyle:'solid', minHeight:'auto', cursor:'pointer', position:'relative'}} onClick={()=>{
+                                        document.getElementById('new-title').value = library[t].title;
+                                        document.getElementById('new-lyrics').value = library[t].lyrics;
+                                    }}>
+                                        <div style={{fontWeight:900, fontSize:'0.9rem'}}>{t}</div>
+                                        <i data-lucide="trash-2" style={{position:'absolute', right:'15px', top:'50%', transform:'translateY(-50%)', width:16, height:16, color:'var(--danger)', cursor:'pointer'}} onClick={e=>{e.stopPropagation(); if(confirm('삭제하시겠습니까?')){const n={...library}; delete n[t]; setLibrary(n); showToast("🗑️ 보관함에서 삭제되었습니다.");}}}></i>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {targetSlotIdx !== null && (
+                        <div className="modal-overlay" onClick={()=>setTargetSlotIdx(null)}>
+                            <div className="modal-box" onClick={e=>e.stopPropagation()}>
+                                <h3 style={{marginBottom:20, textAlign:'center', fontWeight:900}}>찬양 선택</h3>
+                                <div style={{display:'grid', gap:10}}>
+                                    {Object.keys(library).length === 0 && <p style={{textAlign:'center', color:'var(--text-dim)'}}>보관함이 비어있습니다.</p>}
+                                    {Object.keys(library).sort().map(t => (
+                                        <div key={t} className="preview-item" style={{padding:15}} onClick={()=>{
+                                            const n = [...slots]; n[targetSlotIdx] = { song: library[t], themeUrl: themes[0].url };
+                                            setSlots(n); setTargetSlotIdx(null);
+                                        }}>{t}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {themeSelectorIdx !== null && (
+                        <div className="modal-overlay" onClick={()=>setThemeSelectorIdx(null)}>
+                            <div className="modal-box" onClick={e=>e.stopPropagation()}>
+                                <h3 style={{textAlign:'center', marginBottom:20, fontWeight:900}}>배경 테마 선택</h3>
+                                <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:10}}>
+                                    {themes.map(t => (
+                                        <div key={t.id} style={{aspectRatio:'16/9', borderRadius:10, backgroundImage:`url(${t.url})`, backgroundSize:'cover', cursor:'pointer', position:'relative', border:'1px solid var(--border)'}} onClick={()=>{
+                                            const n = [...slots]; n[themeSelectorIdx].themeUrl = t.url;
+                                            setSlots(n); setThemeSelectorIdx(null);
+                                        }}>
+                                            <div style={{position:'absolute', bottom:0, width:'100%', background:'rgba(0,0,0,0.7)', fontSize:'0.7rem', textAlign:'center', padding:4, borderBottomLeftRadius:8, borderBottomRightRadius:8}}>{t.name}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
