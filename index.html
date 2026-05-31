@@ -96,7 +96,9 @@
         const decodeShareData = (str) => {
             try {
                 if (!str) return [];
-                const decoded = decodeURIComponent(atob(str).split('').map((c) => {
+                // URL Query 영역에서 '+' 특수문자가 공백(' ')으로 자가 치환되어 유실되는 브라우저 스펙 버그를 철저히 복구
+                const sanitized = str.replace(/ /g, '+');
+                const decoded = decodeURIComponent(atob(sanitized).split('').map((c) => {
                     return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
                 }).join(''));
                 return JSON.parse(decoded);
