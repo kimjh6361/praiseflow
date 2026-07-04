@@ -1,0 +1,15 @@
+{
+  "name": "praiseflow-pro",
+  "version": "1.0.0",
+  "description": "PraiseFlow Pro - Worship Lyrics System",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "package-mac": "electron-packager . PraiseFlow --platform=darwin --arch=universal --out=dist/ --overwrite",
+    "package-win": "electron-packager . PraiseFlow --platform=win32 --arch=x64 --out=dist/ --overwrite"
+  },
+  "devDependencies": {
+    "electron": "^28.2.0",
+    "electron-packager": "^17.1.2"
+  }
+}
