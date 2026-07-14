@@ -10,6 +10,8 @@
     <script src="lib/babel.min.js"></script>
     <script src="lib/lucide.min.js"></script>
     <script src="lib/mqttws31.min.js" type="text/javascript"></script>
+    <!-- Supabase SDK 추가 -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <style>
         :root { --primary: #c084fc; --secondary: #22c55e; --bg: #0b0b0f; --card-bg: #18181b; --text-main: #fafafa; --text-dim: #71717a; --border: #27272a; --danger: #ef4444; }
@@ -139,6 +141,11 @@
           }
         };
 
+        // Supabase 연동 정보 초기화 (kosta-카드사용내역 설정 공유)
+        const supabaseUrl = 'https://rfyzvjerkzqepdbfqfoi.supabase.co';
+        const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmeXp2amVya3pxZXBkYmZxZm9pIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2OTE3MTYsImV4cCI6MjA5MzI2NzcxNn0.iVdZn6d65f04vlmt-jwoRHKQcZ0R2D4x-cI2Ds1jt68';
+        const supabase = window.supabase ? window.supabase.createClient(supabaseUrl, supabaseAnonKey) : null;
+
         const App = () => {
             const [mode] = useState(() => new URLSearchParams(window.location.search).get('mode') || 'controller');
             const [view, setView] = useState('planner');
@@ -153,6 +160,8 @@
             // 최신 상태를 리스너 클로저 문제 없이 즉시 조회하기 위한 useRef 보관 (로컬 file:// 통신 및 팝업 연동용)
             const liveSlideRef = React.useRef(null);
             const activePointerRef = React.useRef({ slotIdx: -1, blockIdx: -1 });
+            const fetchFromDBRef = React.useRef(null);
+            const fetchSlotsFromDBRef = React.useRef(null);
 
             // 화면 크기를 실시간으로 추적하여 모바일 기기 여부 감지 (세로 최적화 반응형 뷰어 구현용)
             const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
@@ -209,6 +218,15 @@
                             }
                             if (packet.type === 'UPDATE_POINTER') {
                                 setActivePointer(packet.payload);
+                            }
+                        }
+                        // 컨트롤러 기기들 간의 보관함 및 큐시트 동기화 시그널 수신 시 처리
+                        if (mode === 'controller') {
+                            if (packet.type === 'UPDATE_DB_LIBRARY') {
+                                if (fetchFromDBRef.current) fetchFromDBRef.current(true);
+                            }
+                            if (packet.type === 'UPDATE_DB_SLOTS') {
+                                if (fetchSlotsFromDBRef.current) fetchSlotsFromDBRef.current(true);
                             }
                         }
                     } catch (e) {
@@ -352,16 +370,234 @@
             const [expandedSlots, setExpandedSlots] = useState({});
             const [isFullscreen, setIsFullscreen] = useState(false);
 
+            const [dbSyncEnabled, setDbSyncEnabled] = useState(() => JSON.parse(localStorage.getItem('praise_db_sync_enabled') || 'false'));
+            const [isSyncing, setIsSyncing] = useState(false);
+
+            useEffect(() => {
+                localStorage.setItem('praise_db_sync_enabled', JSON.stringify(dbSyncEnabled));
+            }, [dbSyncEnabled]);
+
+            // DB에서 찬양 목록 가져오기
+            const fetchFromDB = async (silent = false) => {
+                if (!supabase) return;
+                try {
+                    if (!silent) setIsSyncing(true);
+                    const { data, error } = await supabase
+                        .from('praise_songs')
+                        .select('*')
+                        .eq('channel_id', channelId);
+                    
+                    if (error) throw error;
+                    
+                    if (data) {
+                        const dbLibrary = {};
+                        data.forEach(item => {
+                            dbLibrary[item.title] = {
+                                title: item.title,
+                                lyrics: item.lyrics,
+                                createdAt: new Date(item.created_at).getTime(),
+                                updatedAt: new Date(item.updated_at).getTime()
+                            };
+                        });
+                        
+                        setLibrary(prev => {
+                            const merged = { ...prev };
+                            Object.keys(dbLibrary).forEach(title => {
+                                if (!merged[title] || dbLibrary[title].updatedAt > (merged[title].updatedAt || 0)) {
+                                    merged[title] = dbLibrary[title];
+                                }
+                            });
+                            return merged;
+                        });
+                        if (!silent) showToast("☁️ 데이터베이스에서 찬양 목록을 불러왔습니다!");
+                    }
+                } catch (err) {
+                    console.error("DB 로드 실패:", err);
+                    if (!silent) alert("데이터베이스를 불러오는 데 실패했습니다: " + err.message);
+                } finally {
+                    if (!silent) setIsSyncing(false);
+                }
+            };
+
+            // DB에 전체 보관함 업로드하기
+            const uploadToDB = async () => {
+                if (!supabase) return alert("Supabase 클라이언트가 초기화되지 않았습니다. 인터넷 연결을 확인해 주세요.");
+                try {
+                    setIsSyncing(true);
+                    const songTitles = Object.keys(library);
+                    if (songTitles.length === 0) return alert("업로드할 곡이 없습니다.");
+
+                    const songsToUpsert = songTitles.map(title => ({
+                        channel_id: channelId,
+                        title: library[title].title,
+                        lyrics: library[title].lyrics,
+                        created_at: new Date(library[title].createdAt || Date.now()).toISOString(),
+                        updated_at: new Date(library[title].updatedAt || Date.now()).toISOString()
+                    }));
+
+                    const { error } = await supabase
+                        .from('praise_songs')
+                        .upsert(songsToUpsert, { onConflict: 'channel_id,title' });
+
+                    if (error) throw error;
+
+                    showToast("☁️ 현재 보관함이 데이터베이스에 저장되었습니다!");
+                    sendMqttSignal('UPDATE_DB_LIBRARY');
+                } catch (err) {
+                    console.error("DB 업로드 실패:", err);
+                    alert("데이터베이스 저장에 실패했습니다: " + err.message);
+                } finally {
+                    setIsSyncing(false);
+                }
+            };
+
+            // DB에서 큐시트(slots) 가져오기
+            const fetchSlotsFromDB = async (silent = false) => {
+                if (!supabase) return;
+                try {
+                    if (!silent) setIsSyncing(true);
+                    const { data, error } = await supabase
+                        .from('praise_slots')
+                        .select('slots_data')
+                        .eq('channel_id', channelId)
+                        .single();
+                    
+                    if (error && error.code !== 'PGRST116') {
+                        throw error;
+                    }
+                    
+                    if (data && data.slots_data) {
+                        setSlots(data.slots_data);
+                        if (!silent) showToast("☁️ 데이터베이스에서 예배 순서를 불러왔습니다!");
+                    }
+                } catch (err) {
+                    console.error("Slots DB 로드 실패:", err);
+                    if (!silent) alert("예배 순서를 불러오는 데 실패했습니다: " + err.message);
+                } finally {
+                    if (!silent) setIsSyncing(false);
+                }
+            };
+
+            // DB에 큐시트(slots) 저장하기
+            const saveSlotsToDB = async (newSlots) => {
+                if (!supabase || !dbSyncEnabled) return;
+                try {
+                    const cleaned = newSlots.map(slot => {
+                        if (!slot) return null;
+                        return {
+                            song: {
+                                title: slot.song.title,
+                                lyrics: slot.song.lyrics
+                            },
+                            themeUrl: slot.themeUrl
+                        };
+                    });
+                    
+                    const { error } = await supabase
+                        .from('praise_slots')
+                        .upsert({
+                            channel_id: channelId,
+                            slots_data: cleaned,
+                            updated_at: new Date().toISOString()
+                        });
+
+                    if (error) throw error;
+                    sendMqttSignal('UPDATE_DB_SLOTS');
+                } catch (e) {
+                    console.error("Slots DB 저장 실패:", e);
+                }
+            };
+
+            // MQTT를 활용한 실시간 동기화 시그널 전송
+            const sendMqttSignal = (type) => {
+                if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
+                    try {
+                        const message = new window.Paho.MQTT.Message(JSON.stringify({ type, channelId }));
+                        message.destinationName = `praiseflow/sync/${channelId}`;
+                        mqttClientRef.current.send(message);
+                    } catch (e) {
+                        console.error("MQTT 시그널 전송 실패:", e);
+                    }
+                }
+            };
+            // 레퍼런스 최신화
+            fetchFromDBRef.current = fetchFromDB;
+            fetchSlotsFromDBRef.current = fetchSlotsFromDB;
+
+            const [searchTerm, setSearchTerm] = useState('');
+            const [modalSearchTerm, setModalSearchTerm] = useState('');
+            const [sortBy, setSortBy] = useState('chapter'); // 'chapter' | 'abc' | 'latest'
+
+            // 검색어 및 정렬 기준에 맞춰 라이브러리 키 배열 반환
+            const getSortedAndFilteredList = (searchQuery) => {
+                const keys = Object.keys(library).filter(title => {
+                    if (!searchQuery) return true;
+                    const query = searchQuery.toLowerCase();
+                    const titleMatch = title.toLowerCase().includes(query);
+                    const lyricsMatch = (library[title].lyrics || '').toLowerCase().includes(query);
+                    return titleMatch || lyricsMatch;
+                });
+
+                if (sortBy === 'chapter') {
+                    return keys.sort((a, b) => {
+                        const matchA = a.match(/^(\d+)장/);
+                        const matchB = b.match(/^(\d+)장/);
+                        if (matchA && matchB) {
+                            return parseInt(matchA[1], 10) - parseInt(matchB[1], 10);
+                        }
+                        if (matchA) return -1;
+                        if (matchB) return 1;
+                        return a.localeCompare(b, 'ko');
+                    });
+                } else if (sortBy === 'latest') {
+                    return keys.sort((a, b) => {
+                        const timeA = library[a].createdAt || library[a].updatedAt || 0;
+                        const timeB = library[b].createdAt || library[b].updatedAt || 0;
+                        if (timeA !== timeB) return timeB - timeA;
+                        return a.localeCompare(b, 'ko');
+                    });
+                } else {
+                    return keys.sort((a, b) => a.localeCompare(b, 'ko'));
+                }
+            };
+
             // 뷰어 모드가 아닐 때만 로컬 스토리지에 자동 저장 (방문자의 로컬 스토리지 데이터 보호)
             useEffect(() => {
                 if (mode !== 'viewer') {
                     localStorage.setItem('praise_flow_f_db', JSON.stringify(library));
                     localStorage.setItem('praise_flow_slots', JSON.stringify(slots));
                 }
+            }, [library, slots, mode]);
+
+            // 최초 기기 접속 시 데이터 자동 동기화
+            useEffect(() => {
+                const urlParams = new URLSearchParams(window.location.search);
+                const hasChannelParam = urlParams.has('channel');
+                
+                if (hasChannelParam && !dbSyncEnabled) {
+                    setDbSyncEnabled(true);
+                }
+
+                if (dbSyncEnabled || hasChannelParam) {
+                    const initSync = async () => {
+                        const loader = document.getElementById('loader');
+                        if (loader) loader.style.display = 'flex';
+                        
+                        if (fetchFromDBRef.current) await fetchFromDBRef.current(true);
+                        if (fetchSlotsFromDBRef.current) await fetchSlotsFromDBRef.current(true);
+                        
+                        if (loader) loader.style.display = 'none';
+                    };
+                    initSync();
+                }
+            }, [channelId]);
+
+            // 화면 상태 변경 시 아이콘 및 로더 제어
+            useEffect(() => {
                 const loader = document.getElementById('loader');
                 if (loader) loader.style.display = 'none';
                 if (window.lucide) window.lucide.createIcons();
-            }, [library, slots, mode, themes, themeSelectorIdx, deletingId, expandedSlots, deletingLibTitle]);
+            }, [view, targetSlotIdx, themeSelectorIdx, deletingId, expandedSlots, deletingLibTitle, themes]);
 
             // 팝업창이 사용자에 의해 직접 닫혔는지 주기적으로 감시하여 체크박스 상태와 동기화하는 백업 루프
             useEffect(() => {
@@ -618,6 +854,18 @@
                 });
             };
 
+            // 공동 작업용 관리자 링크 복사
+            const handleControllerShareLink = () => {
+                const shareUrl = `${window.location.origin}${window.location.pathname}?mode=controller&channel=${channelId}`;
+                
+                navigator.clipboard.writeText(shareUrl).then(() => {
+                    showToast("🔗 공동 편집 공유 링크가 복사되었습니다!");
+                }).catch(err => {
+                    console.error("복사 실패", err);
+                    alert("링크 복사 중 오류가 발생했습니다. 수동으로 복사해 주세요:\n" + shareUrl);
+                });
+            };
+
             // PPT 송출 모드 (Presenter) 렌더링
             if (mode === 'presenter') {
                 return (
@@ -848,7 +1096,10 @@
                         </h1>
                         <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
                             <button className="btn" style={{background:'#1e1b4b', color:'#c084fc', border:'1px solid #4338ca'}} onClick={handleShareLink}>
-                                <i data-lucide="share-2"></i> 🔗 공유 링크 복사
+                                <i data-lucide="share-2"></i> 🖥️ 자막 뷰어 링크 복사
+                            </button>
+                            <button className="btn" style={{background:'#022c22', color:'#34d399', border:'1px solid #065f46'}} onClick={handleControllerShareLink}>
+                                <i data-lucide="edit-3"></i> ✏️ 공동 편집 링크 복사
                             </button>
                             <label style={{display:'flex', alignItems:'center', gap:'8px', cursor:'pointer', background:'rgba(255,255,255,0.05)', padding:'8px 16px', borderRadius:'12px', border:'1px solid var(--border)', fontSize:'0.9rem', fontWeight:800}}>
                                 <input type="checkbox" checked={externalPresent} onChange={(e)=>setExternalPresent(e.target.checked)} style={{cursor:'pointer', accentColor:'var(--primary)', width:16, height:16}} />
@@ -905,7 +1156,7 @@
                                                             </div>
                                                             <div style={{display:'flex', gap:5, marginBottom:10, flexWrap:'wrap'}}>
                                                                 <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>setThemeSelectorIdx(i)}>테마</button>
-                                                                <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'var(--danger)', background:'rgba(239,68,68,0.05)', border:'1px solid rgba(239,68,68,0.2)'}} onClick={()=>{const n=[...slots]; n[i]=null; setSlots(n); setExpandedSlots(prev => ({...prev, [i]: false}));}}>삭제</button>
+                                                                <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'var(--danger)', background:'rgba(239,68,68,0.05)', border:'1px solid rgba(239,68,68,0.2)'}} onClick={()=>{const n=[...slots]; n[i]=null; setSlots(n); saveSlotsToDB(n); setExpandedSlots(prev => ({...prev, [i]: false}));}}>삭제</button>
                                                                 <button 
                                                                     className="btn btn-outline" 
                                                                     style={{
@@ -999,9 +1250,23 @@
                                     if(!file) return;
                                     const r = new FileReader();
                                     r.onload = (ev) => {
-                                        const data = JSON.parse(ev.target.result);
-                                        setLibrary(prev => ({...prev, ...data}));
-                                        showToast("📥 라이브러리를 정상적으로 불렀왔습니다!");
+                                        try {
+                                            const data = JSON.parse(ev.target.result);
+                                            const updatedData = {};
+                                            // 백업본의 각 곡에 생성/수정 시간이 없으면 현재 시간 부여
+                                            Object.keys(data).forEach(key => {
+                                                updatedData[key] = {
+                                                    title: data[key].title || key,
+                                                    lyrics: data[key].lyrics || "",
+                                                    createdAt: data[key].createdAt || Date.now(),
+                                                    updatedAt: data[key].updatedAt || Date.now()
+                                                };
+                                            });
+                                            setLibrary(prev => ({...prev, ...updatedData}));
+                                            showToast("📥 라이브러리를 정상적으로 불러왔습니다!");
+                                        } catch (err) {
+                                            alert("파일 분석에 실패했습니다.");
+                                        }
                                     };
                                     r.readAsText(file);
                                 }} />
@@ -1018,20 +1283,74 @@
                                 const t = document.getElementById('new-title').value.trim();
                                 const l = document.getElementById('new-lyrics').value.trim();
                                 if(!t) return alert("제목을 입력하세요.");
-                                setLibrary(prev => ({...prev, [t]: {title:t, lyrics:l}}));
+                                setLibrary(prev => {
+                                    const existing = prev[t];
+                                    return {
+                                        ...prev,
+                                        [t]: {
+                                            title: t,
+                                            lyrics: l,
+                                            createdAt: existing ? (existing.createdAt || Date.now()) : Date.now(),
+                                            updatedAt: Date.now()
+                                        }
+                                    };
+                                });
                                 document.getElementById('new-title').value = '';
                                 document.getElementById('new-lyrics').value = '';
                                 showToast("✨ 보관함에 새 찬양이 저장되었습니다!");
                             }}>보관함에 추가</button>
 
-                            <h3 style={{marginTop:'3rem', marginBottom:15, fontWeight:900}}>보관함 목록 ({Object.keys(library).length})</h3>
-                            <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:'10px'}}>
-                                {Object.keys(library).sort().map(t => (
-                                    <div key={t} className="slot-card" style={{padding:'1rem', borderStyle:'solid', minHeight:'auto', cursor:'pointer', position:'relative', display:'flex', justifyContent:'space-between', alignItems:'center'}} onClick={()=>{
+                            <div style={{marginTop:'3rem', marginBottom:15, display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:10}}>
+                                <h3 style={{fontWeight:900, margin:0}}>보관함 목록 ({Object.keys(library).length})</h3>
+                                <div style={{display:'flex', gap:10, alignItems:'center', flexWrap:'wrap'}}>
+                                    {/* 검색창 */}
+                                    <div style={{position:'relative', display:'flex', alignItems:'center'}}>
+                                        <input 
+                                            type="text" 
+                                            placeholder="곡명 또는 가사 검색" 
+                                            value={searchTerm} 
+                                            onChange={(e) => setSearchTerm(e.target.value)}
+                                            style={{padding:'8px 12px 8px 32px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'8px', color:'white', fontSize:'0.85rem', width:'180px'}}
+                                        />
+                                        <i data-lucide="search" style={{position:'absolute', left:10, width:14, height:14, color:'var(--text-dim)'}}></i>
+                                        {searchTerm && (
+                                            <button onClick={() => setSearchTerm('')} style={{position:'absolute', right:10, background:'none', border:'none', color:'var(--text-dim)', cursor:'pointer', fontSize:'0.8rem'}}>✕</button>
+                                        )}
+                                    </div>
+                                    {/* 정렬 방식 토글 */}
+                                    <div style={{display:'flex', background:'rgba(255,255,255,0.05)', padding:3, borderRadius:8, border:'1px solid var(--border)'}}>
+                                        <button 
+                                            onClick={() => setSortBy('chapter')} 
+                                            style={{padding:'5px 10px', fontSize:'0.75rem', border:'none', borderRadius:6, cursor:'pointer', fontWeight:800, background: sortBy === 'chapter' ? 'var(--primary)' : 'transparent', color: sortBy === 'chapter' ? 'white' : 'var(--text-dim)', transition:'0.2s'}}
+                                        >
+                                            장 번호 순
+                                        </button>
+                                        <button 
+                                            onClick={() => setSortBy('abc')} 
+                                            style={{padding:'5px 10px', fontSize:'0.75rem', border:'none', borderRadius:6, cursor:'pointer', fontWeight:800, background: sortBy === 'abc' ? 'var(--primary)' : 'transparent', color: sortBy === 'abc' ? 'white' : 'var(--text-dim)', transition:'0.2s'}}
+                                        >
+                                            가나다 순
+                                        </button>
+                                        <button 
+                                            onClick={() => setSortBy('latest')} 
+                                            style={{padding:'5px 10px', fontSize:'0.75rem', border:'none', borderRadius:6, cursor:'pointer', fontWeight:800, background: sortBy === 'latest' ? 'var(--primary)' : 'transparent', color: sortBy === 'latest' ? 'white' : 'var(--text-dim)', transition:'0.2s'}}
+                                        >
+                                            최신 등록순
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:'10px'}}>
+                                {getSortedAndFilteredList(searchTerm).map(t => (
+                                    <div key={t} className="slot-card" style={{padding:'10px 14px', borderStyle:'solid', minHeight:'60px', cursor:'pointer', position:'relative', display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'flex-start', background: 'rgba(255, 255, 255, 0.02)', borderColor: 'var(--border)'}} onClick={()=>{
                                         document.getElementById('new-title').value = library[t].title;
                                         document.getElementById('new-lyrics').value = library[t].lyrics;
+                                        window.scrollTo({ top: 300, behavior: 'smooth' });
                                     }}>
-                                        <div style={{fontWeight:900, fontSize:'0.9rem', marginRight:'40px'}}>{t}</div>
+                                        <div style={{fontWeight:900, fontSize:'0.85rem', color:'white', width:'80%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t}</div>
+                                        <div style={{fontSize:'0.7rem', color:'var(--text-dim)', marginTop:'4px', width:'80%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                            {(library[t].lyrics || '').split('\n')[0] || '가사 없음'}
+                                        </div>
                                         <button 
                                             style={{
                                                 position:'absolute', right:'12px', top:'50%', transform:'translateY(-50%)',
@@ -1079,20 +1398,71 @@
                     )}
 
                     {targetSlotIdx !== null && (
-                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setTargetSlotIdx(null); }}>
-                            <div className="modal-box" onClick={e=>e.stopPropagation()}>
-                                <h3 style={{marginBottom:20, textAlign:'center', fontWeight:900}}>찬양 선택</h3>
-                                <div style={{display:'grid', gap:10}}>
-                                    {Object.keys(library).length === 0 && <p style={{textAlign:'center', color:'var(--text-dim)'}}>보관함이 비어있습니다.</p>}
-                                    {Object.keys(library).sort().map(t => (
-                                        <div key={t} className="preview-item" style={{padding:15}} onClick={()=>{
-                                            const n = [...slots]; n[targetSlotIdx] = { song: library[t], themeUrl: themes[0].url };
-                                            setSlots(n); 
-                                            setExpandedSlots(prev => ({...prev, [targetSlotIdx]: true}));
-                                            setTargetSlotIdx(null);
-                                        }}>{t}</div>
-                                    ))}
+                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) { setTargetSlotIdx(null); setModalSearchTerm(''); } }}>
+                            <div className="modal-box" style={{maxWidth:'450px', width:'90%', maxHeight:'85vh', display:'flex', flexDirection:'column', padding:'1.5rem'}} onClick={e=>e.stopPropagation()}>
+                                <h3 style={{marginBottom:15, textAlign:'center', fontWeight:900}}>찬양 선택</h3>
+                                
+                                <div style={{marginBottom:15, display:'flex', flexDirection:'column', gap:10}}>
+                                    <div style={{position:'relative', display:'flex', alignItems:'center'}}>
+                                        <input 
+                                            type="text" 
+                                            placeholder="곡명 또는 가사 검색" 
+                                            value={modalSearchTerm} 
+                                            onChange={(e) => setModalSearchTerm(e.target.value)}
+                                            style={{width:'100%', padding:'10px 12px 10px 34px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'10px', color:'white', fontSize:'0.85rem'}}
+                                        />
+                                        <i data-lucide="search" style={{position:'absolute', left:12, width:14, height:14, color:'var(--text-dim)'}}></i>
+                                        {modalSearchTerm && (
+                                            <button onClick={() => setModalSearchTerm('')} style={{position:'absolute', right:12, background:'none', border:'none', color:'var(--text-dim)', cursor:'pointer', fontSize:'0.8rem'}}>✕</button>
+                                        )}
+                                    </div>
+                                    <div style={{display:'flex', background:'rgba(255,255,255,0.05)', padding:3, borderRadius:8, border:'1px solid var(--border)', alignSelf:'flex-end'}}>
+                                        <button 
+                                            onClick={() => setSortBy('chapter')} 
+                                            style={{padding:'4px 8px', fontSize:'0.7rem', border:'none', borderRadius:6, cursor:'pointer', fontWeight:800, background: sortBy === 'chapter' ? 'var(--primary)' : 'transparent', color: sortBy === 'chapter' ? 'white' : 'var(--text-dim)', transition:'0.2s'}}
+                                        >
+                                            장 번호 순
+                                        </button>
+                                        <button 
+                                            onClick={() => setSortBy('abc')} 
+                                            style={{padding:'4px 8px', fontSize:'0.7rem', border:'none', borderRadius:6, cursor:'pointer', fontWeight:800, background: sortBy === 'abc' ? 'var(--primary)' : 'transparent', color: sortBy === 'abc' ? 'white' : 'var(--text-dim)', transition:'0.2s'}}
+                                        >
+                                            가나다 순
+                                        </button>
+                                        <button 
+                                            onClick={() => setSortBy('latest')} 
+                                            style={{padding:'4px 8px', fontSize:'0.7rem', border:'none', borderRadius:6, cursor:'pointer', fontWeight:800, background: sortBy === 'latest' ? 'var(--primary)' : 'transparent', color: sortBy === 'latest' ? 'white' : 'var(--text-dim)', transition:'0.2s'}}
+                                        >
+                                            최신 등록순
+                                        </button>
+                                    </div>
                                 </div>
+
+                                <div style={{overflowY:'auto', flex:1, display:'grid', gap:8, paddingRight:5}}>
+                                    {getSortedAndFilteredList(modalSearchTerm).length === 0 ? (
+                                        <p style={{textAlign:'center', color:'var(--text-dim)', padding:'20px 0'}}>검색 결과가 없습니다.</p>
+                                    ) : (
+                                        getSortedAndFilteredList(modalSearchTerm).map(t => (
+                                            <div key={t} className="preview-item" style={{padding:'12px 15px', borderRadius:10, display:'flex', flexDirection:'column', gap:2}} onClick={()=>{
+                                                const n = [...slots]; n[targetSlotIdx] = { song: library[t], themeUrl: themes[0].url };
+                                                setSlots(n);
+                                                saveSlotsToDB(n); 
+                                                setExpandedSlots(prev => ({...prev, [targetSlotIdx]: true}));
+                                                setTargetSlotIdx(null);
+                                                setModalSearchTerm('');
+                                            }}>
+                                                <span style={{fontWeight:900, fontSize:'0.9rem', color:'white'}}>{t}</span>
+                                                <span style={{fontSize:'0.7rem', color:'var(--text-dim)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                                    {(library[t].lyrics || '').split('\n')[0] || '가사 없음'}
+                                                </span>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+
+                                <button className="btn btn-outline" style={{marginTop:15, width:'100%', padding:'10px', fontSize:'0.85rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={() => { setTargetSlotIdx(null); setModalSearchTerm(''); }}>
+                                    닫기
+                                </button>
                             </div>
                         </div>
                     )}
