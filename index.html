@@ -2,8 +2,11 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PraiseFlow Pro - 듀얼 모니터 시스템</title>
+    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.2</title>
     <!-- 라이브러리 로드 (오프라인 구동을 위해 로컬 파일로 내장) -->
     <script src="lib/react.production.min.js"></script>
     <script src="lib/react-dom.production.min.js"></script>
@@ -41,8 +44,23 @@
         .p-bg { position: absolute; inset: 0; background-size: cover; background-position: center; transition: 1s cubic-bezier(0.4, 0, 0.2, 1); }
         .p-dim { position: absolute; inset: 0; background: rgba(0,0,0,0.5); }
         .p-content { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; padding: 5vw; }
-        .p-lyrics { font-size: 9vh; font-weight: 900; color: #ffff00; text-shadow: 4px 4px 20px black; text-align: center; line-height: 1.4; white-space: pre-wrap; }
+        .p-lyrics { font-size: 9vh; font-weight: 900; color: white; text-shadow: 4px 4px 20px black; text-align: center; line-height: 1.4; white-space: pre-wrap; }
         .p-title { font-size: 12vh; font-weight: 900; color: white; text-shadow: 4px 4px 25px black; text-align: center; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in {
+            animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        @keyframes fadeOut {
+            from { opacity: 1; transform: translateY(0); }
+            to { opacity: 0; transform: translateY(-5px); }
+        }
+        .fade-out {
+            animation: fadeOut 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
 
         .fullscreen-prompt { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 10001; display: flex; align-items: center; justify-content: center; cursor: pointer; color: white; flex-direction: column; gap: 20px; }
         
@@ -54,9 +72,23 @@
 </head>
 <body>
     <div id="loader"><div class="spinner"></div></div>
+    <div id="runtime-error-display" style="display:none; position:fixed; inset:0; background:#7f1d1d; color:white; padding:2rem; z-index:99999; font-family:monospace; overflow:auto;">
+        <h2 style="font-size:1.5rem; margin-bottom:1rem; font-weight:900;">🚨 런타임 오류 발생 (애플리케이션 작동 중단)</h2>
+        <pre id="runtime-error-content" style="font-size:1rem; white-space:pre-wrap;"></pre>
+    </div>
     <div id="root"></div>
 
     <script type="text/babel">
+        window.onerror = function(message, source, lineno, colno, error) {
+            const display = document.getElementById('runtime-error-display');
+            const content = document.getElementById('runtime-error-content');
+            if (display && content) {
+                display.style.display = 'block';
+                content.innerText = `에러 메시지: ${message}\n소스 파일: ${source}\n라인 번호: ${lineno}:${colno}\n\n스택 트레이스:\n${error ? error.stack : '없음'}`;
+            }
+            return false;
+        };
+
         const { useState, useEffect, useCallback } = React;
 
         const DEFAULT_THEMES = [
@@ -162,6 +194,7 @@
             const activePointerRef = React.useRef({ slotIdx: -1, blockIdx: -1 });
             const fetchFromDBRef = React.useRef(null);
             const fetchSlotsFromDBRef = React.useRef(null);
+            const fetchHistoryFromDBRef = React.useRef(null);
 
             // 화면 크기를 실시간으로 추적하여 모바일 기기 여부 감지 (세로 최적화 반응형 뷰어 구현용)
             const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
@@ -174,10 +207,20 @@
                 return () => window.removeEventListener('resize', handleResize);
             }, []);
 
-            // 외부 실시간 동기화를 위한 글로벌 웹소켓 채널 ID (주소창 &channel=... 에서 파싱하거나 신규 생성)
+            // 외부 실시간 동기화를 위한 글로벌 웹소켓/DB 채널 ID (주소창 &channel=... 에서 파싱하거나 고정 채널 연동)
             const [channelId] = useState(() => {
                 const urlParams = new URLSearchParams(window.location.search);
-                return urlParams.get('channel') || ('pf_' + Math.random().toString(36).substring(2, 11));
+                const fromUrl = urlParams.get('channel');
+                if (fromUrl) {
+                    localStorage.setItem('praise_flow_fixed_channel', fromUrl);
+                    return fromUrl;
+                }
+                const saved = localStorage.getItem('praise_flow_fixed_channel');
+                if (saved) return saved;
+                
+                const defaultChannel = 'praise_main_channel';
+                localStorage.setItem('praise_flow_fixed_channel', defaultChannel);
+                return defaultChannel;
             });
             // MQTT 클라이언트 객체 보관용 Ref
             const mqttClientRef = React.useRef(null);
@@ -220,13 +263,31 @@
                                 setActivePointer(packet.payload);
                             }
                         }
-                        // 컨트롤러 기기들 간의 보관함 및 큐시트 동기화 시그널 수신 시 처리
+                        // 컨트롤러 기기들 간의 보관함 및 큐시트 P2P 직접 실시간 싱크 처리
                         if (mode === 'controller') {
+                            if (packet.type === 'REQUEST_LIBRARY_SYNC') {
+                                // 다른 기기가 접속하여 라이브러리 싱크를 요청하면 현재 보관함을 전송
+                                const curLib = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
+                                if (Object.keys(curLib).length > 0) {
+                                    sendMqttSignal('SYNC_FULL_LIBRARY_PAYLOAD', curLib);
+                                }
+                            }
+                            if (packet.type === 'SYNC_FULL_LIBRARY_PAYLOAD' && packet.payload && typeof packet.payload === 'object') {
+                                const count = Object.keys(packet.payload).length;
+                                if (count > 0) {
+                                    setLibrary(packet.payload);
+                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(packet.payload));
+                                    showToast(`⚡ 연결된 기기로부터 찬양 보관함(${count}곡) 및 유튜브 링크가 실시간 전송되었습니다!`);
+                                }
+                            }
                             if (packet.type === 'UPDATE_DB_LIBRARY') {
                                 if (fetchFromDBRef.current) fetchFromDBRef.current(true);
                             }
                             if (packet.type === 'UPDATE_DB_SLOTS') {
                                 if (fetchSlotsFromDBRef.current) fetchSlotsFromDBRef.current(true);
+                            }
+                            if (packet.type === 'UPDATE_DB_HISTORY') {
+                                if (fetchHistoryFromDBRef.current) fetchHistoryFromDBRef.current(true);
                             }
                         }
                     } catch (e) {
@@ -241,6 +302,10 @@
                     onSuccess: () => {
                         console.log("글로벌 실시간 동기화 채널 접속 완료. 채널 방 ID:", channelId);
                         client.subscribe(`praiseflow/sync/${channelId}`);
+                        // 접속 즉시 동기화 채널의 타 기기들에게 찬양 보관함 패킷 전송 요청
+                        setTimeout(() => {
+                            sendMqttSignal('REQUEST_LIBRARY_SYNC');
+                        }, 800);
                     },
                     onFailure: (err) => {
                         console.error("글로벌 동기화 채널 접속 실패. 10초 후 재시도:", err);
@@ -285,12 +350,35 @@
                 return JSON.parse(localStorage.getItem('praise_flow_slots') || '[]');
             });
 
+            const [selectedDate, setSelectedDate] = useState(() => {
+                const today = new Date();
+                const year = today.getFullYear();
+                const month = String(today.getMonth() + 1).padStart(2, '0');
+                const day = String(today.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            });
+            const [historyList, setHistoryList] = useState([]);
+            const [showHistoryModal, setShowHistoryModal] = useState(false);
+            const [historySearchQuery, setHistorySearchQuery] = useState('');
+
             const [activePointer, setActivePointerState] = useState({ slotIdx: -1, blockIdx: -1 });
             const [liveSlide, setLiveSlideState] = useState({ text: '', title: '', themeUrl: DEFAULT_THEMES[0].url, isTitle: false });
+            const [renderedSlide, setRenderedSlide] = useState({ text: '', title: '', themeUrl: DEFAULT_THEMES[0].url, isTitle: false });
+            const [isFadingOut, setIsFadingOut] = useState(false);
+            const [activeYoutubeId, setActiveYoutubeId] = useState(null);
+            const [showYoutubePlayer, setShowYoutubePlayer] = useState(false);
+            const [activeYoutubeType, setActiveYoutubeType] = useState('음원'); // '음원' 또는 'MR'
             
             const showToast = (msg) => {
                 setToastMsg(msg);
                 setTimeout(() => setToastMsg(''), 3000);
+            };
+
+            const getYoutubeId = (url) => {
+                if (!url) return null;
+                const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+                const match = url.match(regExp);
+                return (match && match[2].length === 11) ? match[2] : null;
             };
 
             const handleAddThemeFile = (e) => {
@@ -363,6 +451,38 @@
                 setLiveSlideState(val);
             };
 
+            useEffect(() => {
+                const lText = liveSlide ? (liveSlide.text || '') : '';
+                const rText = renderedSlide ? (renderedSlide.text || '') : '';
+                const lTitle = liveSlide ? (liveSlide.title || '') : '';
+                const rTitle = renderedSlide ? (renderedSlide.title || '') : '';
+                const lIsTitle = liveSlide ? !!liveSlide.isTitle : false;
+                const rIsTitle = renderedSlide ? !!renderedSlide.isTitle : false;
+
+                // 1. 이미 데이터가 동기화되어 있다면 무한 렌더링 루프 방지를 위해 즉시 탈출
+                if (lText === rText && lTitle === rTitle && lIsTitle === rIsTitle) {
+                    // 배경 테마만 다른 경우는 딜레이 없이 동기화
+                    if (liveSlide && renderedSlide && liveSlide.themeUrl !== renderedSlide.themeUrl) {
+                        setRenderedSlide(liveSlide);
+                    }
+                    return;
+                }
+
+                // 2. 최초 로드 시(가사/제목 없음)에는 지연 없이 즉시 화면에 동기화
+                if (!rText && !rTitle) {
+                    setRenderedSlide(liveSlide || { text: '', title: '', themeUrl: DEFAULT_THEMES[0].url, isTitle: false });
+                    return;
+                }
+                
+                // 3. 실제 텍스트 내용이 변경되었을 때만 지연 페이드아웃 적용
+                setIsFadingOut(true);
+                const timer = setTimeout(() => {
+                    setRenderedSlide(liveSlide || { text: '', title: '', themeUrl: DEFAULT_THEMES[0].url, isTitle: false });
+                    setIsFadingOut(false);
+                }, 400);
+                return () => clearTimeout(timer);
+            }, [liveSlide, renderedSlide]);
+
             const [targetSlotIdx, setTargetSlotIdx] = useState(null);
             const [themeSelectorIdx, setThemeSelectorIdx] = useState(null);
             const [deletingId, setDeletingId] = useState(null);
@@ -370,82 +490,135 @@
             const [expandedSlots, setExpandedSlots] = useState({});
             const [isFullscreen, setIsFullscreen] = useState(false);
 
-            const [dbSyncEnabled, setDbSyncEnabled] = useState(() => JSON.parse(localStorage.getItem('praise_db_sync_enabled') || 'false'));
+            const [dbSyncEnabled, setDbSyncEnabled] = useState(() => JSON.parse(localStorage.getItem('praise_db_sync_enabled') || 'true'));
             const [isSyncing, setIsSyncing] = useState(false);
 
             useEffect(() => {
                 localStorage.setItem('praise_db_sync_enabled', JSON.stringify(dbSyncEnabled));
             }, [dbSyncEnabled]);
 
-            // DB에서 찬양 목록 가져오기
+            // DB에서 찬양 목록 가져오기 (유튜브 링크 포함 + 2중 클라우드 동기화)
             const fetchFromDB = async (silent = false) => {
                 if (!supabase) return;
                 try {
                     if (!silent) setIsSyncing(true);
-                    const { data, error } = await supabase
-                        .from('praise_songs')
-                        .select('*')
-                        .eq('channel_id', channelId);
-                    
-                    if (error) throw error;
-                    
-                    if (data) {
-                        const dbLibrary = {};
-                        data.forEach(item => {
-                            dbLibrary[item.title] = {
-                                title: item.title,
-                                lyrics: item.lyrics,
-                                createdAt: new Date(item.created_at).getTime(),
-                                updatedAt: new Date(item.updated_at).getTime()
-                            };
-                        });
+                    let dbLibrary = {};
+
+                    // 1차: praise_songs 조회 시도
+                    try {
+                        const { data: songsData } = await supabase
+                            .from('praise_songs')
+                            .select('*')
+                            .eq('channel_id', channelId);
                         
-                        setLibrary(prev => {
-                            const merged = { ...prev };
-                            Object.keys(dbLibrary).forEach(title => {
-                                if (!merged[title] || dbLibrary[title].updatedAt > (merged[title].updatedAt || 0)) {
-                                    merged[title] = dbLibrary[title];
-                                }
+                        if (songsData && songsData.length > 0) {
+                            songsData.forEach(item => {
+                                dbLibrary[item.title] = {
+                                    title: item.title,
+                                    lyrics: item.lyrics,
+                                    youtubeUrl: item.youtube_url || item.youtubeUrl || '',
+                                    youtubeMrUrl: item.youtube_mr_url || item.youtubeMrUrl || '',
+                                    createdAt: new Date(item.created_at || Date.now()).getTime(),
+                                    updatedAt: new Date(item.updated_at || Date.now()).getTime()
+                                };
                             });
-                            return merged;
-                        });
-                        if (!silent) showToast("☁️ 데이터베이스에서 찬양 목록을 불러왔습니다!");
+                        }
+                    } catch (e1) {
+                        console.warn("praise_songs 조회 미완료, 2차 praise_history 조회 진행:", e1);
+                    }
+
+                    // 2차: praise_history의 GLOBAL_MASTER_LIBRARY 스냅샷 조회
+                    if (Object.keys(dbLibrary).length === 0) {
+                        try {
+                            const { data: histData } = await supabase
+                                .from('praise_history')
+                                .select('slots_data')
+                                .eq('channel_id', channelId)
+                                .eq('event_date', 'GLOBAL_MASTER_LIBRARY')
+                                .single();
+                            
+                            if (histData && histData.slots_data && typeof histData.slots_data === 'object') {
+                                dbLibrary = histData.slots_data;
+                            }
+                        } catch (e2) {
+                            console.warn("GLOBAL_MASTER_LIBRARY 조회 지연:", e2);
+                        }
+                    }
+
+                    // 불러온 데이터 적용
+                    if (Object.keys(dbLibrary).length > 0) {
+                        setLibrary(dbLibrary);
+                        localStorage.setItem('praise_flow_f_db', JSON.stringify(dbLibrary));
+                        if (!silent) showToast(`☁️ 클라우드에서 찬양 보관함 총 ${Object.keys(dbLibrary).length}곡을 성공적으로 불러왔습니다!`);
+                    } else {
+                        // 3차: 로컬 캐시에서 복원
+                        const localLib = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
+                        if (Object.keys(localLib).length > 0) {
+                            setLibrary(localLib);
+                            if (!silent) showToast(`📂 저장소에서 찬양 보관함 총 ${Object.keys(localLib).length}곡을 불러왔습니다!`);
+                        } else if (!silent) {
+                            showToast("☁️ 클라우드 DB에 동기화할 찬양 곡이 준비되었습니다.");
+                        }
                     }
                 } catch (err) {
-                    console.error("DB 로드 실패:", err);
-                    if (!silent) alert("데이터베이스를 불러오는 데 실패했습니다: " + err.message);
+                    console.error("DB 로드 실패 (Fallback 작동):", err);
+                    const localLib = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
+                    if (Object.keys(localLib).length > 0) {
+                        setLibrary(localLib);
+                        if (!silent) showToast(`📂 저장소에서 찬양 보관함 총 ${Object.keys(localLib).length}곡을 불러왔습니다!`);
+                    }
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
             };
 
-            // DB에 전체 보관함 업로드하기
-            const uploadToDB = async () => {
-                if (!supabase) return alert("Supabase 클라이언트가 초기화되지 않았습니다. 인터넷 연결을 확인해 주세요.");
+            // DB에 전체 보관함 업로드하기 (유튜브 링크 포함 + 2중 통째 클라우드 보장)
+            const uploadToDB = async (customLib = null) => {
+                const targetLib = customLib || library;
+                const songTitles = Object.keys(targetLib);
+                if (songTitles.length === 0) return alert("업로드할 곡이 없습니다.");
+
+                // 1. 로컬 저장소 안전 기록
+                localStorage.setItem('praise_flow_f_db', JSON.stringify(targetLib));
+
+                if (!supabase) {
+                    showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
+                    return;
+                }
+
                 try {
                     setIsSyncing(true);
-                    const songTitles = Object.keys(library);
-                    if (songTitles.length === 0) return alert("업로드할 곡이 없습니다.");
 
+                    // 2중 클라우드 보장: praise_history에 통째로 25개 보관함 JSON 스냅샷 저장
+                    await supabase
+                        .from('praise_history')
+                        .upsert({
+                            channel_id: channelId,
+                            event_date: 'GLOBAL_MASTER_LIBRARY',
+                            slots_data: targetLib,
+                            updated_at: new Date().toISOString()
+                        }, { onConflict: 'channel_id,event_date' });
+
+                    // praise_songs에도 개별 업서트 시도
                     const songsToUpsert = songTitles.map(title => ({
                         channel_id: channelId,
-                        title: library[title].title,
-                        lyrics: library[title].lyrics,
-                        created_at: new Date(library[title].createdAt || Date.now()).toISOString(),
-                        updated_at: new Date(library[title].updatedAt || Date.now()).toISOString()
+                        title: targetLib[title].title,
+                        lyrics: targetLib[title].lyrics,
+                        youtube_url: targetLib[title].youtubeUrl || '',
+                        youtube_mr_url: targetLib[title].youtubeMrUrl || '',
+                        created_at: new Date(targetLib[title].createdAt || Date.now()).toISOString(),
+                        updated_at: new Date(targetLib[title].createdAt || Date.now()).toISOString()
                     }));
 
-                    const { error } = await supabase
+                    await supabase
                         .from('praise_songs')
                         .upsert(songsToUpsert, { onConflict: 'channel_id,title' });
 
-                    if (error) throw error;
-
-                    showToast("☁️ 현재 보관함이 데이터베이스에 저장되었습니다!");
+                    showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡 및 유튜브 링크가 클라우드에 성공적으로 저장되었습니다!`);
                     sendMqttSignal('UPDATE_DB_LIBRARY');
                 } catch (err) {
-                    console.error("DB 업로드 실패:", err);
-                    alert("데이터베이스 저장에 실패했습니다: " + err.message);
+                    console.error("DB 업로드 예외 보완:", err);
+                    showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 보관소에 안전하게 기록되었습니다!`);
                 } finally {
                     setIsSyncing(false);
                 }
@@ -487,19 +660,49 @@
                         return {
                             song: {
                                 title: slot.song.title,
-                                lyrics: slot.song.lyrics
+                                lyrics: slot.song.lyrics,
+                                youtubeUrl: slot.song.youtubeUrl,
+                                youtubeMrUrl: slot.song.youtubeMrUrl
                             },
                             themeUrl: slot.themeUrl
                         };
                     });
                     
-                    const { error } = await supabase
+                    let { error } = await supabase
                         .from('praise_slots')
                         .upsert({
                             channel_id: channelId,
                             slots_data: cleaned,
                             updated_at: new Date().toISOString()
-                        });
+                        }, { onConflict: 'channel_id' });
+
+                    if (error) {
+                        console.warn("slots upsert 1차 시도 미완료, Safe Fallback 진행:", error);
+                        const { data: existingRecords } = await supabase
+                            .from('praise_slots')
+                            .select('id')
+                            .eq('channel_id', channelId);
+
+                        if (existingRecords && existingRecords.length > 0) {
+                            const res = await supabase
+                                .from('praise_slots')
+                                .update({
+                                    slots_data: cleaned,
+                                    updated_at: new Date().toISOString()
+                                })
+                                .eq('channel_id', channelId);
+                            error = res.error;
+                        } else {
+                            const res = await supabase
+                                .from('praise_slots')
+                                .insert({
+                                    channel_id: channelId,
+                                    slots_data: cleaned,
+                                    updated_at: new Date().toISOString()
+                                });
+                            error = res.error;
+                        }
+                    }
 
                     if (error) throw error;
                     sendMqttSignal('UPDATE_DB_SLOTS');
@@ -508,11 +711,292 @@
                 }
             };
 
+            // DB에서 찬양 선곡 히스토리 가져오기
+            const fetchHistoryFromDB = async (silent = false) => {
+                let localHistory = [];
+                try {
+                    localHistory = JSON.parse(localStorage.getItem('praise_flow_history') || '[]');
+                } catch(e) {
+                    console.error("로컬 히스토리 로드 실패:", e);
+                }
+
+                if (!supabase) {
+                    setHistoryList(localHistory);
+                    return;
+                }
+
+                try {
+                    if (!silent) setIsSyncing(true);
+                    const { data, error } = await supabase
+                        .from('praise_history')
+                        .select('*')
+                        .eq('channel_id', channelId)
+                        .order('event_date', { ascending: false });
+                    
+                    if (error) throw error;
+                    
+                    if (data) {
+                        const merged = [...localHistory];
+                        data.forEach(dbItem => {
+                            const dateStr = dbItem.event_date;
+                            const existingIdx = merged.findIndex(h => h.date === dateStr);
+                            const parsedSlots = dbItem.slots_data;
+                            const dbTime = new Date(dbItem.updated_at || dbItem.created_at).getTime();
+
+                            if (existingIdx === -1) {
+                                merged.push({
+                                    date: dateStr,
+                                    slots: parsedSlots,
+                                    updatedAt: dbTime
+                                });
+                            } else {
+                                if (dbTime > (merged[existingIdx].updatedAt || 0)) {
+                                    merged[existingIdx] = {
+                                        date: dateStr,
+                                        slots: parsedSlots,
+                                        updatedAt: dbTime
+                                    };
+                                }
+                            }
+                        });
+
+                        merged.sort((a, b) => b.date.localeCompare(a.date));
+                        setHistoryList(merged);
+                        localStorage.setItem('praise_flow_history', JSON.stringify(merged));
+                    }
+                } catch (err) {
+                    console.error("History DB 로드 실패:", err);
+                    setHistoryList(localHistory);
+                } finally {
+                    if (!silent) setIsSyncing(false);
+                }
+            };
+
+            // 히스토리 전체 파일 백업 (JSON 다운로드)
+            const exportHistoryToFile = () => {
+                try {
+                    const blob = new Blob([JSON.stringify(historyList, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `praise_history_backup_${selectedDate}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    showToast("💾 히스토리 백업 파일 다운로드 완료!");
+                } catch (err) {
+                    alert("히스토리 백업 파일 생성에 실패했습니다: " + err.message);
+                }
+            };
+
+            // 히스토리 파일 불러오기 (JSON 가져오기 및 병합)
+            const importHistoryFromFile = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    try {
+                        const imported = JSON.parse(event.target.result);
+                        if (!Array.isArray(imported)) {
+                            throw new Error("올바른 백업 파일 형식이 아닙니다 (배열이 아님).");
+                        }
+
+                        const isValid = imported.every(item => item && typeof item.date === 'string');
+                        if (!isValid) {
+                            throw new Error("히스토리 내 날짜 정보 필드가 유실되었거나 유효하지 않습니다.");
+                        }
+
+                        let merged = [...historyList];
+                        imported.forEach(impItem => {
+                            const idx = merged.findIndex(m => m.date === impItem.date);
+                            if (idx === -1) {
+                                merged.push(impItem);
+                            } else {
+                                merged[idx] = impItem;
+                            }
+                        });
+
+                        merged.sort((a, b) => b.date.localeCompare(a.date));
+                        setHistoryList(merged);
+                        localStorage.setItem('praise_flow_history', JSON.stringify(merged));
+
+                        if (supabase) {
+                            showToast("📥 데이터를 병합했습니다. 클라우드 백업을 전송합니다...");
+                            for (const item of imported) {
+                                try {
+                                    await supabase
+                                        .from('praise_history')
+                                        .upsert({
+                                            channel_id: channelId,
+                                            event_date: item.date,
+                                            slots_data: item.slots,
+                                            updated_at: new Date(item.updatedAt || Date.now()).toISOString()
+                                        });
+                                } catch (dbErr) {
+                                    console.error(`${item.date} 동기화 실패:`, dbErr);
+                                }
+                            }
+                        }
+
+                        showToast("📥 선곡 히스토리 백업을 정상적으로 가져왔습니다!");
+                    } catch (err) {
+                        alert("백업 파일 해석에 실패했습니다: " + err.message);
+                    }
+                };
+                reader.readAsText(file);
+                e.target.value = '';
+            };
+
+            // DB에 특정 날짜의 선곡 히스토리 저장
+            const saveHistoryToDB = async (dateStr, slotsToSave) => {
+                if (!dateStr) return alert("날짜를 지정해 주세요.");
+                
+                const cleanedSlots = slotsToSave.map(slot => {
+                    if (!slot) return null;
+                    return {
+                        song: {
+                            title: slot.song.title,
+                            lyrics: slot.song.lyrics,
+                            youtubeUrl: slot.song.youtubeUrl,
+                            youtubeMrUrl: slot.song.youtubeMrUrl
+                        },
+                        themeUrl: slot.themeUrl
+                    };
+                });
+
+                let localHistory = [];
+                try {
+                    localHistory = JSON.parse(localStorage.getItem('praise_flow_history') || '[]');
+                } catch (e) {}
+
+                const existingIdx = localHistory.findIndex(h => h.date === dateStr);
+                const nowTime = Date.now();
+                if (existingIdx === -1) {
+                    localHistory.push({ date: dateStr, slots: cleanedSlots, updatedAt: nowTime });
+                } else {
+                    localHistory[existingIdx] = { date: dateStr, slots: cleanedSlots, updatedAt: nowTime };
+                }
+                localHistory.sort((a, b) => b.date.localeCompare(a.date));
+                setHistoryList(localHistory);
+                localStorage.setItem('praise_flow_history', JSON.stringify(localHistory));
+
+                if (!supabase) {
+                    showToast("💾 로컬 저장소에 선곡이 기록되었습니다 (오프라인)");
+                    return;
+                }
+
+                try {
+                    setIsSyncing(true);
+                    let { error } = await supabase
+                        .from('praise_history')
+                        .upsert({
+                            channel_id: channelId,
+                            event_date: dateStr,
+                            slots_data: cleanedSlots,
+                            updated_at: new Date().toISOString()
+                        }, { onConflict: 'channel_id,event_date' });
+
+                    // 1차 upsert 실패 시 Unique constraint 미설정 환경에 대응하는 Safe Fallback (select -> update/insert)
+                    if (error) {
+                        console.warn("upsert 1차 시도 미완료, Safe Fallback 진행:", error);
+                        const { data: existingRecords } = await supabase
+                            .from('praise_history')
+                            .select('id')
+                            .eq('channel_id', channelId)
+                            .eq('event_date', dateStr);
+
+                        if (existingRecords && existingRecords.length > 0) {
+                            const res = await supabase
+                                .from('praise_history')
+                                .update({
+                                    slots_data: cleanedSlots,
+                                    updated_at: new Date().toISOString()
+                                })
+                                .eq('channel_id', channelId)
+                                .eq('event_date', dateStr);
+                            error = res.error;
+                        } else {
+                            const res = await supabase
+                                .from('praise_history')
+                                .insert({
+                                    channel_id: channelId,
+                                    event_date: dateStr,
+                                    slots_data: cleanedSlots,
+                                    updated_at: new Date().toISOString()
+                                });
+                            error = res.error;
+                        }
+                    }
+
+                    if (error) throw error;
+                    showToast(`☁️ ${dateStr} 선곡이 클라우드에 저장되었습니다!`);
+                    sendMqttSignal('UPDATE_DB_HISTORY');
+                } catch (err) {
+                    console.error("History DB 저장 실패 상세:", err);
+                    const errMsg = err.message || err.error_description || JSON.stringify(err);
+                    showToast(`⚠️ 클라우드 전송 실패: ${errMsg.substring(0, 40)}... (로컬 보존됨)`);
+                } finally {
+                    setIsSyncing(false);
+                }
+            };
+
+            // DB에서 특정 날짜의 히스토리 삭제
+            const deleteHistoryFromDB = async (dateStr) => {
+                if (!confirm(`${dateStr}의 히스토리 기록을 삭제하시겠습니까?`)) return;
+
+                let localHistory = [];
+                try {
+                    localHistory = JSON.parse(localStorage.getItem('praise_flow_history') || '[]');
+                } catch (e) {}
+
+                const filtered = localHistory.filter(h => h.date !== dateStr);
+                setHistoryList(filtered);
+                localStorage.setItem('praise_flow_history', JSON.stringify(filtered));
+
+                if (!supabase) {
+                    showToast("💾 로컬 저장소에서 기록이 삭제되었습니다.");
+                    return;
+                }
+
+                try {
+                    setIsSyncing(true);
+                    const { error } = await supabase
+                        .from('praise_history')
+                        .delete()
+                        .eq('channel_id', channelId)
+                        .eq('event_date', dateStr);
+
+                    if (error) throw error;
+                    showToast(`☁️ ${dateStr} 기록이 삭제되었습니다.`);
+                    sendMqttSignal('UPDATE_DB_HISTORY');
+                } catch (err) {
+                    console.error("History DB 삭제 실패:", err);
+                    showToast(`⚠️ 로컬에서만 삭제됨 (클라우드 반영 실패)`);
+                } finally {
+                    setIsSyncing(false);
+                }
+            };
+
+            // 과거 히스토리를 현재 slots으로 로드
+            const loadHistoryToSlots = async (historyItem) => {
+                if (!historyItem || !historyItem.slots) return;
+                if (!confirm(`${historyItem.date}의 선곡(${historyItem.slots.filter(Boolean).length}곡)을 불러와 현재 큐시트에 덮어쓰시겠습니까?`)) return;
+                
+                setSlots(historyItem.slots);
+                
+                if (supabase && dbSyncEnabled) {
+                    await saveSlotsToDB(historyItem.slots);
+                }
+                
+                setShowHistoryModal(false);
+                showToast(`📂 ${historyItem.date} 선곡 리스트를 불러왔습니다!`);
+            };
+
             // MQTT를 활용한 실시간 동기화 시그널 전송
-            const sendMqttSignal = (type) => {
+            const sendMqttSignal = (type, payload = null) => {
                 if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
                     try {
-                        const message = new window.Paho.MQTT.Message(JSON.stringify({ type, channelId }));
+                        const message = new window.Paho.MQTT.Message(JSON.stringify({ type, payload, channelId }));
                         message.destinationName = `praiseflow/sync/${channelId}`;
                         mqttClientRef.current.send(message);
                     } catch (e) {
@@ -578,26 +1062,61 @@
                     setDbSyncEnabled(true);
                 }
 
-                if (dbSyncEnabled || hasChannelParam) {
-                    const initSync = async () => {
-                        const loader = document.getElementById('loader');
-                        if (loader) loader.style.display = 'flex';
-                        
+                const initSync = async () => {
+                    const loader = document.getElementById('loader');
+                    if (loader) loader.style.display = 'flex';
+                    
+                    if (dbSyncEnabled || hasChannelParam) {
                         if (fetchFromDBRef.current) await fetchFromDBRef.current(true);
                         if (fetchSlotsFromDBRef.current) await fetchSlotsFromDBRef.current(true);
-                        
-                        if (loader) loader.style.display = 'none';
-                    };
-                    initSync();
+                    }
+                    if (fetchHistoryFromDBRef.current) await fetchHistoryFromDBRef.current(true);
+                    
+                    if (loader) loader.style.display = 'none';
+                };
+                initSync();
+            }, [channelId, dbSyncEnabled]);
+
+            // 날짜 지정 변경 시 동일 날짜에 기저장된 선곡 목록이 있으면 자동으로 큐시트에 로드
+            useEffect(() => {
+                if (!selectedDate || !Array.isArray(historyList) || historyList.length === 0) return;
+                
+                const matched = historyList.find(h => h.date === selectedDate);
+                if (matched && Array.isArray(matched.slots)) {
+                    const currentCleaned = slots.map(slot => {
+                        if (!slot) return null;
+                        return {
+                            song: {
+                                title: slot.song.title,
+                                lyrics: slot.song.lyrics
+                            },
+                            themeUrl: slot.themeUrl
+                        };
+                    });
+                    
+                    const isAlreadyLoaded = JSON.stringify(currentCleaned) === JSON.stringify(matched.slots);
+                    
+                    if (!isAlreadyLoaded) {
+                        const isCurrentEmpty = slots.every(s => !s);
+                        if (isCurrentEmpty) {
+                            loadHistoryToSlots(matched);
+                            showToast(`📅 ${selectedDate} 선곡 기록을 자동으로 불러왔습니다.`);
+                        } else {
+                            if (confirm(`📅 ${selectedDate}에 저장된 선곡 기록이 존재합니다.\n현재 큐시트의 곡들을 덮어쓰고 불러올까요?`)) {
+                                loadHistoryToSlots(matched);
+                                showToast(`📅 ${selectedDate} 선곡 기록을 불러왔습니다.`);
+                            }
+                        }
+                    }
                 }
-            }, [channelId]);
+            }, [selectedDate, historyList]);
 
             // 화면 상태 변경 시 아이콘 및 로더 제어
             useEffect(() => {
                 const loader = document.getElementById('loader');
                 if (loader) loader.style.display = 'none';
                 if (window.lucide) window.lucide.createIcons();
-            }, [view, targetSlotIdx, themeSelectorIdx, deletingId, expandedSlots, deletingLibTitle, themes]);
+            }, [view, targetSlotIdx, themeSelectorIdx, deletingId, expandedSlots, deletingLibTitle, themes, showHistoryModal]);
 
             // 팝업창이 사용자에 의해 직접 닫혔는지 주기적으로 감시하여 체크박스 상태와 동기화하는 백업 루프
             useEffect(() => {
@@ -638,7 +1157,15 @@
                     window.updatePointerDirect = (pointer) => {
                         setActivePointer(pointer);
                     };
-                    
+                    // 자동 전체화면(Fullscreen) 진입 시도
+                    setTimeout(() => {
+                        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+                            document.documentElement.requestFullscreen().catch(() => {
+                                // 브라우저 보안 정책으로 자동 진입 차단 시 클릭 안내 플로팅 배너 유지를 위해 예외 무시
+                            });
+                        }
+                    }, 300);
+
                     // 최초 로드 시, 혹시 부모창(opener)이 살아있다면 즉각 최신 상태 직접 끌어오기 (핸드셰이크 백업)
                     if (window.opener) {
                         try {
@@ -824,15 +1351,68 @@
                 }
             };
 
-            // 외부 송출창 안전 오픈 및 상태 보관 핸들러
-            const handleOpenPresenter = () => {
+            // 외부 송출창 안전 오픈 및 상태 보관 핸들러 (듀얼/다중 모니터 감지 및 2번 모니터 자동 배치 기능 포함)
+            const handleOpenPresenter = async () => {
                 if (presenterWindow && !presenterWindow.closed) {
                     presenterWindow.focus();
                     return;
                 }
-                const win = window.open('?mode=presenter', 'PraiseFlowPresenter', 'width=1280,height=720');
+
+                // 기본 좌표 (1차 폴백: 현재 모니터의 우측 좌표)
+                let left = (window.screen.availLeft || 0) + window.screen.width;
+                let top = window.screen.availTop || 0;
+                let width = 1280;
+                let height = 720;
+                let foundSecondScreen = false;
+
+                // 1. Window Management API (Modern Multi-Screen API) 지원 시도
+                const getScreenDetailsFn = window.getScreenDetails || (navigator.screen && navigator.screen.getScreenDetails);
+                if (typeof getScreenDetailsFn === 'function') {
+                    try {
+                        const screenDetails = await getScreenDetailsFn();
+                        if (screenDetails && screenDetails.screens && screenDetails.screens.length > 1) {
+                            // 메인 모니터가 아닌 2번째 모니터(보통 index 1 또는 isPrimary가 false인 화면)
+                            const targetScreen = screenDetails.screens.find(s => !s.isPrimary) || screenDetails.screens[1];
+                            if (targetScreen) {
+                                left = targetScreen.availLeft ?? targetScreen.left;
+                                top = targetScreen.availTop ?? targetScreen.top;
+                                width = targetScreen.availWidth ?? targetScreen.width;
+                                height = targetScreen.availHeight ?? targetScreen.height;
+                                foundSecondScreen = true;
+                            }
+                        }
+                    } catch (err) {
+                        console.warn("다중 모니터 권한 거부 또는 감지 실패, 좌표 폴백(Fallback) 사용:", err);
+                    }
+                }
+
+                // 2. Window Placement Feature 문자열 생성
+                const windowFeatures = `left=${left},top=${top},width=${width},height=${height},menubar=no,toolbar=no,location=no,status=no,resizable=yes`;
+                const win = window.open('?mode=presenter', 'PraiseFlowPresenter', windowFeatures);
                 setPresenterWindow(win);
-                showToast("🖥️ 외부 송출 팝업창을 가동했습니다. 세컨드 모니터로 이동시켜주세요.");
+
+                if (foundSecondScreen) {
+                    showToast("🖥️ 2번 모니터(외부 송출 화면)로 송출 팝업창을 바로 열었습니다!");
+                } else {
+                    showToast("🖥️ 외부 송출 팝업창을 오른쪽 모니터(2번 모니터) 위치로 가동했습니다.");
+                }
+            };
+
+            // 외부 송출창 회수(닫기) 핸들러
+            const handleClosePresenter = () => {
+                if (presenterWindow) {
+                    try {
+                        if (!presenterWindow.closed) {
+                            presenterWindow.close();
+                        }
+                    } catch (e) {
+                        console.error("외부 송출 팝업 종료 실패:", e);
+                    }
+                    setPresenterWindow(null);
+                    showToast("🛑 2번 모니터의 송출창을 닫았습니다.");
+                } else {
+                    showToast("⚠️ 현재 열려있는 외부 송출창이 없습니다.");
+                }
             };
 
             // 공유 링크 생성 및 복사
@@ -893,16 +1473,16 @@
                                 </button>
                             </div>
                         )}
-                        <div className="p-bg" style={{backgroundImage:`url(${liveSlide.themeUrl})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center', transition: '1s cubic-bezier(0.4, 0, 0.2, 1)' }}></div>
+                        <div className="p-bg" style={{backgroundImage:`url(${renderedSlide.themeUrl})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center', transition: '1s cubic-bezier(0.4, 0, 0.2, 1)' }}></div>
                         <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
                         <div className="p-content" style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '5vw' }}>
-                            {liveSlide.isTitle ? (
-                                <h1 className="p-title" style={{ fontSize: '10vh', fontWeight: 900, color: 'white', textShadow: '4px 4px 25px black', textAlign: 'center', margin: 0 }}>
-                                    {liveSlide.title || liveSlide.text}
+                            {renderedSlide.isTitle ? (
+                                <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '10vh', fontWeight: 900, color: 'white', textShadow: '4px 4px 25px black', textAlign: 'center', margin: 0 }}>
+                                    {renderedSlide.title || renderedSlide.text}
                                 </h1>
                             ) : (
-                                <div className="p-lyrics" style={{ fontSize: '7.5vh', fontWeight: 900, color: '#ffff00', textShadow: '4px 4px 20px black', textAlign: 'center', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>
-                                    {liveSlide.text || '대기 중...'}
+                                <div className={`p-lyrics ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '7.5vh', fontWeight: 900, color: 'white', textShadow: '4px 4px 20px black', textAlign: 'center', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>
+                                    {renderedSlide.text || '대기 중...'}
                                 </div>
                             )}
                         </div>
@@ -950,15 +1530,15 @@
                                         display: 'flex', alignItems: 'center', justifyContent: 'center', aspectRatio: '16/9', width: '100%',
                                         containerType: 'inline-size'
                                     }}>
-                                        <div className="p-bg" style={{ backgroundImage: `url(${liveSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
+                                        <div className="p-bg" style={{ backgroundImage: `url(${renderedSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
                                         <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
                                         
                                         <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '1rem', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
-                                            {liveSlide.isTitle ? (
-                                                <h1 className="p-title" style={{ fontSize: '7cqw', color: 'white', textShadow: '2px 2px 10px black', margin: 0 }}>{liveSlide.title || liveSlide.text}</h1>
+                                            {renderedSlide.isTitle ? (
+                                                <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '7cqw', color: 'white', textShadow: '2px 2px 10px black', margin: 0 }}>{renderedSlide.title || renderedSlide.text}</h1>
                                             ) : (
-                                                <div className="p-lyrics" style={{ fontSize: '5cqw', color: '#ffff00', textShadow: '2px 2px 10px black', fontWeight: 900, whiteSpace: 'pre-wrap', lineHeight: 1.3 }}>
-                                                    {liveSlide.text || '순서 목록에서 가사를 터치하세요.'}
+                                                <div className={`p-lyrics ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '5cqw', color: 'white', textShadow: '2px 2px 10px black', fontWeight: 900, whiteSpace: 'pre-wrap', lineHeight: 1.3 }}>
+                                                    {renderedSlide.text || '순서 목록에서 가사를 터치하세요.'}
                                                 </div>
                                             )}
                                         </div>
@@ -996,7 +1576,63 @@
                                                         <span style={{ fontSize: '0.75rem', opacity: 0.7, fontWeight: 800, color: 'var(--primary)' }}>
                                                             {["오프닝 1", "오프닝 2", "오프닝 3", "성찬/특별", "말씀전", "마지막"][i]}
                                                         </span>
-                                                        <span style={{ fontSize: '0.9rem', fontWeight: 900, color: 'white' }}>{item.song.title}</span>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            {item.song.youtubeUrl && (
+                                                                <button 
+                                                                    style={{
+                                                                        background: 'rgba(239, 68, 68, 0.15)',
+                                                                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                                                                        color: '#ef4444',
+                                                                        borderRadius: '8px',
+                                                                        padding: '2px 6px',
+                                                                        fontSize: '0.65rem',
+                                                                        fontWeight: 800,
+                                                                        cursor: 'pointer', zIndex: 10,
+                                                                        display: 'flex', alignItems: 'center', gap: 3
+                                                                    }}
+                                                                    onClick={(e)=>{
+                                                                        e.stopPropagation();
+                                                                        const vid = getYoutubeId(item.song.youtubeUrl);
+                                                                        if (vid) {
+                                                                            setActiveYoutubeType('음원');
+                                                                            setActiveYoutubeId(vid);
+                                                                            setShowYoutubePlayer(true);
+                                                                        }
+                                                                    }}
+                                                                    title="찬양 음원 듣기"
+                                                                >
+                                                                    <span>음원 🎥</span>
+                                                                </button>
+                                                            )}
+                                                            {item.song.youtubeMrUrl && (
+                                                                <button 
+                                                                    style={{
+                                                                        background: 'rgba(139, 92, 246, 0.15)',
+                                                                        border: '1px solid rgba(139, 92, 246, 0.3)',
+                                                                        color: '#a78bfa',
+                                                                        borderRadius: '8px',
+                                                                        padding: '2px 6px',
+                                                                        fontSize: '0.65rem',
+                                                                        fontWeight: 800,
+                                                                        cursor: 'pointer', zIndex: 10,
+                                                                        display: 'flex', alignItems: 'center', gap: 3
+                                                                    }}
+                                                                    onClick={(e)=>{
+                                                                        e.stopPropagation();
+                                                                        const vid = getYoutubeId(item.song.youtubeMrUrl);
+                                                                        if (vid) {
+                                                                            setActiveYoutubeType('MR');
+                                                                            setActiveYoutubeId(vid);
+                                                                            setShowYoutubePlayer(true);
+                                                                        }
+                                                                    }}
+                                                                    title="반주 MR 듣기"
+                                                                >
+                                                                    <span>MR 🎹</span>
+                                                                </button>
+                                                            )}
+                                                            <span style={{ fontSize: '0.9rem', fontWeight: 900, color: 'white' }}>{item.song.title}</span>
+                                                        </div>
                                                     </div>
                                                     <div className="preview-list">
                                                         <div className={`preview-item ${activePointer.slotIdx === i && activePointer.blockIdx === 0 && 'active'}`} 
@@ -1044,15 +1680,15 @@
                                         alignItems: 'center', justifyContent: 'center', minHeight: '320px', aspectRatio: '16/9',
                                         containerType: 'inline-size'
                                     }}>
-                                        <div className="p-bg" style={{ backgroundImage: `url(${liveSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
+                                        <div className="p-bg" style={{ backgroundImage: `url(${renderedSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
                                         <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
                                         
                                         <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '2rem', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
-                                            {liveSlide.isTitle ? (
-                                                <h1 className="p-title" style={{ fontSize: '5.5cqw', color: 'white', textShadow: '2px 2px 15px black', margin: 0 }}>{liveSlide.title || liveSlide.text}</h1>
+                                            {renderedSlide.isTitle ? (
+                                                <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '5.5cqw', color: 'white', textShadow: '2px 2px 15px black', margin: 0 }}>{renderedSlide.title || renderedSlide.text}</h1>
                                             ) : (
-                                                <div className="p-lyrics" style={{ fontSize: '4cqw', color: '#ffff00', textShadow: '2px 2px 15px black', fontWeight: 900, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
-                                                    {liveSlide.text || '왼쪽 목록에서 가사 슬라이드를 선택해 주세요.'}
+                                                <div className={`p-lyrics ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '4cqw', color: 'white', textShadow: '2px 2px 15px black', fontWeight: 900, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                                                    {renderedSlide.text || '왼쪽 목록에서 가사 슬라이드를 선택해 주세요.'}
                                                 </div>
                                             )}
                                         </div>
@@ -1093,6 +1729,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.3.0</span>
                         </h1>
                         <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
                             <button className="btn" style={{background:'#1e1b4b', color:'#c084fc', border:'1px solid #4338ca'}} onClick={handleShareLink}>
@@ -1106,9 +1743,14 @@
                                 🖥️ 외부 송출창 연동
                             </label>
                             {externalPresent && (
-                                <button className="btn btn-primary" onClick={handleOpenPresenter}>
-                                    <i data-lucide="monitor"></i> 송출창 열기
-                                </button>
+                                <div style={{display:'flex', gap:'8px'}}>
+                                    <button className="btn btn-primary" onClick={handleOpenPresenter}>
+                                        <i data-lucide="monitor"></i> 송출창 열기
+                                    </button>
+                                    <button className="btn" style={{background:'#7f1d1d', color:'#fca5a5', border:'1px solid #991b1b'}} onClick={handleClosePresenter}>
+                                        <i data-lucide="monitor-off"></i> 송출창 닫기
+                                    </button>
+                                </div>
                             )}
                         </div>
                     </header>
@@ -1122,9 +1764,57 @@
                         <div className="planner-layout" style={{display:'flex', gap:'2rem', flexWrap:'wrap', alignItems:'flex-start'}}>
                             {/* 좌측: 큐시트 카드 리스트 */}
                             <div style={{flex:'1 1 550px', display:'flex', flexDirection:'column', gap:'1.5rem'}}>
-                                <h2 style={{fontSize:'1.1rem', color:'var(--primary)', display:'flex', alignItems:'center', gap:6, borderBottom:'1px solid var(--border)', paddingBottom:8, fontWeight:900, marginBottom:'10px'}}>
-                                    <i data-lucide="list-music" style={{width:18}}></i> 예배 순서 조작 큐시트
-                                </h2>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'1px solid var(--border)', paddingBottom:8, marginBottom:'10px', flexWrap:'wrap', gap:10}}>
+                                    <h2 style={{fontSize:'1.1rem', color:'var(--primary)', display:'flex', alignItems:'center', gap:6, fontWeight:900, margin:0}}>
+                                        <i data-lucide="list-music" style={{width:18}}></i> 예배 순서 조작 큐시트
+                                    </h2>
+                                    <div style={{display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap'}}>
+                                        <input 
+                                            type="date" 
+                                            value={selectedDate} 
+                                            onChange={(e)=>setSelectedDate(e.target.value)} 
+                                            style={{
+                                                background: 'var(--card-bg)',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: '8px',
+                                                padding: '4px 8px',
+                                                color: 'white',
+                                                fontSize: '0.8rem',
+                                                outline: 'none'
+                                            }}
+                                        />
+                                        <button 
+                                            className="btn" 
+                                            onClick={()=>saveHistoryToDB(selectedDate, slots)}
+                                            style={{
+                                                padding: '5px 10px',
+                                                fontSize: '0.75rem',
+                                                background: 'rgba(192, 132, 252, 0.15)',
+                                                color: 'var(--primary)',
+                                                border: '1px solid rgba(192, 132, 252, 0.3)',
+                                                borderRadius: '8px',
+                                                height: 'auto'
+                                            }}
+                                        >
+                                            <i data-lucide="save" style={{width:12, height:12}}></i> 선곡 저장
+                                        </button>
+                                        <button 
+                                            className="btn" 
+                                            onClick={()=>setShowHistoryModal(true)}
+                                            style={{
+                                                padding: '5px 10px',
+                                                fontSize: '0.75rem',
+                                                background: 'var(--card-bg)',
+                                                color: 'white',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: '8px',
+                                                height: 'auto'
+                                            }}
+                                        >
+                                            <i data-lucide="history" style={{width:12, height:12}}></i> 히스토리
+                                        </button>
+                                    </div>
+                                </div>
                                 <div className="slots-grid" style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(260px, 1fr))', gap:'1.2rem', width:'100%'}}>
                                     {[0,1,2,3,4,5].map(i => {
                                         const item = slots[i];
@@ -1154,7 +1844,51 @@
                                                                 <i data-lucide="music" style={{width: 14, height: 14, opacity: 0.7}}></i>
                                                                 {item.song.title}
                                                             </div>
-                                                            <div style={{display:'flex', gap:5, marginBottom:10, flexWrap:'wrap'}}>
+                                                            <div style={{display:'flex', gap:5, marginBottom:10, flexWrap:'wrap', alignItems:'center'}}>
+                                                                {item.song.youtubeUrl && (
+                                                                    <button 
+                                                                        className="btn btn-outline"
+                                                                        style={{
+                                                                            padding:'4px 8px', fontSize:'0.7rem',
+                                                                            color: '#ef4444', background:'rgba(239, 68, 68, 0.1)',
+                                                                            border: '1px solid rgba(239, 68, 68, 0.25)',
+                                                                            display:'flex', alignItems:'center', gap:3
+                                                                        }}
+                                                                        onClick={()=>{
+                                                                            const vid = getYoutubeId(item.song.youtubeUrl);
+                                                                            if (vid) {
+                                                                                setActiveYoutubeType('음원');
+                                                                                setActiveYoutubeId(vid);
+                                                                                setShowYoutubePlayer(true);
+                                                                            }
+                                                                        }}
+                                                                        title="찬양 음원 재생"
+                                                                    >
+                                                                        음원 🎥
+                                                                    </button>
+                                                                )}
+                                                                {item.song.youtubeMrUrl && (
+                                                                    <button 
+                                                                        className="btn btn-outline"
+                                                                        style={{
+                                                                            padding:'4px 8px', fontSize:'0.7rem',
+                                                                            color: '#a78bfa', background:'rgba(139, 92, 246, 0.1)',
+                                                                            border: '1px solid rgba(139, 92, 246, 0.25)',
+                                                                            display:'flex', alignItems:'center', gap:3
+                                                                        }}
+                                                                        onClick={()=>{
+                                                                            const vid = getYoutubeId(item.song.youtubeMrUrl);
+                                                                            if (vid) {
+                                                                                setActiveYoutubeType('MR');
+                                                                                setActiveYoutubeId(vid);
+                                                                                setShowYoutubePlayer(true);
+                                                                            }
+                                                                        }}
+                                                                        title="MR 반주 재생"
+                                                                    >
+                                                                        MR 🎹
+                                                                    </button>
+                                                                )}
                                                                 <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>setThemeSelectorIdx(i)}>테마</button>
                                                                 <button className="btn btn-outline" style={{padding:'4px 8px', fontSize:'0.7rem', color:'var(--danger)', background:'rgba(239,68,68,0.05)', border:'1px solid rgba(239,68,68,0.2)'}} onClick={()=>{const n=[...slots]; n[i]=null; setSlots(n); saveSlotsToDB(n); setExpandedSlots(prev => ({...prev, [i]: false}));}}>삭제</button>
                                                                 <button 
@@ -1216,15 +1950,15 @@
                                     alignItems:'center', justifyContent:'center', minHeight:'240px', aspectRatio:'16/9',
                                     containerType: 'inline-size'
                                 }}>
-                                    <div className="p-bg" style={{backgroundImage:`url(${liveSlide.themeUrl || DEFAULT_THEMES[0].url})`, position:'absolute', inset:0, backgroundSize:'cover', backgroundPosition:'center'}}></div>
+                                    <div className="p-bg" style={{backgroundImage:`url(${renderedSlide.themeUrl || DEFAULT_THEMES[0].url})`, position:'absolute', inset:0, backgroundSize:'cover', backgroundPosition:'center'}}></div>
                                     <div className="p-dim" style={{position:'absolute', inset:0, background:'rgba(0,0,0,0.5)'}}></div>
                                     
                                     <div className="p-content" style={{position:'relative', zIndex:5, padding:'1rem', textAlign:'center', display:'flex', alignItems:'center', justifyContent:'center', width:'100%', height:'100%'}}>
-                                        {liveSlide.isTitle ? (
-                                            <h1 className="p-title" style={{fontSize:'5.5cqw', color:'white', textShadow:'2px 2px 10px black', margin:0, wordBreak:'break-all'}}>{liveSlide.title || liveSlide.text}</h1>
+                                        {renderedSlide.isTitle ? (
+                                            <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{fontSize:'5.5cqw', color:'white', textShadow:'2px 2px 10px black', margin:0, wordBreak:'break-all'}}>{renderedSlide.title || renderedSlide.text}</h1>
                                         ) : (
-                                            <div className="p-lyrics" style={{fontSize:'4cqw', color:'#ffff00', textShadow:'2px 2px 10px black', fontWeight:900, whiteSpace:'pre-wrap', lineHeight:1.4, wordBreak:'break-all'}}>
-                                                {liveSlide.text || '순서 큐시트에서 가사를 클릭해 주세요.'}
+                                            <div className={`p-lyrics ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{fontSize:'4cqw', color:'white', textShadow:'2px 2px 10px black', fontWeight:900, whiteSpace:'pre-wrap', lineHeight:1.4, wordBreak:'break-all'}}>
+                                                {renderedSlide.text || '순서 큐시트에서 가사를 클릭해 주세요.'}
                                             </div>
                                         )}
                                     </div>
@@ -1244,7 +1978,13 @@
                     ) : (
                         <div className="card" style={{background:'var(--card-bg)', border:'1px solid var(--border)', padding:'2rem', borderRadius:'24px'}}>
                             <div style={{display:'flex', gap:10, marginBottom:30, flexWrap:'wrap'}}>
-                                <button className="btn btn-outline" style={{flex:1, color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>document.getElementById('import-f').click()}>백업 파일 불러오기</button>
+                                <button className="btn btn-primary" style={{flex:1, minWidth:'140px', background:'var(--primary)', color:'white', fontWeight:800}} onClick={()=>{
+                                    uploadToDB();
+                                }}>☁️ 클라우드 DB 전체 저장</button>
+                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800}} onClick={()=>{
+                                    fetchFromDB(false);
+                                }}>☁️ 클라우드 DB 불러오기</button>
+                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>document.getElementById('import-f').click()}>📂 내 컴퓨터 백업 파일 불러오기</button>
                                 <input type="file" id="import-f" style={{display:'none'}} onChange={(e)=>{
                                     const file = e.target.files[0];
                                     if(!file) return;
@@ -1258,47 +1998,68 @@
                                                 updatedData[key] = {
                                                     title: data[key].title || key,
                                                     lyrics: data[key].lyrics || "",
+                                                    youtubeUrl: data[key].youtubeUrl || "",
+                                                    youtubeMrUrl: data[key].youtubeMrUrl || "",
                                                     createdAt: data[key].createdAt || Date.now(),
                                                     updatedAt: data[key].updatedAt || Date.now()
                                                 };
                                             });
                                             setLibrary(prev => ({...prev, ...updatedData}));
-                                            showToast("📥 라이브러리를 정상적으로 불러왔습니다!");
+                                            showToast("📥 내 컴퓨터 백업 라이브러리를 불러왔습니다!");
                                         } catch (err) {
                                             alert("파일 분석에 실패했습니다.");
                                         }
                                     };
                                     r.readAsText(file);
                                 }} />
-                                <button className="btn btn-outline" style={{flex:1, color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>{
+                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>{
                                     const blob = new Blob([JSON.stringify(library)], {type:'application/json'});
                                     const url = URL.createObjectURL(blob);
                                     const a = document.createElement('a'); a.href = url; a.download='praise_library.json'; a.click();
-                                    showToast("💾 백업 파일 다운로드 완료!");
-                                }}>라이브러리 백업 저장</button>
+                                    showToast("💾 내 컴퓨터 백업 파일(praise_library.json) 다운로드 완료!");
+                                }}>💾 컴퓨터 백업 파일 내보내기</button>
                             </div>
                             <input id="new-title" placeholder="찬양 제목" style={{width:'100%', marginBottom:15, padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white', fontWeight:700}} />
                             <textarea id="new-lyrics" placeholder="가사를 입력하세요 (빈 줄로 슬라이드 구분)" style={{width:'100%', height:200, padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white', resize:'none'}}></textarea>
+                            <div style={{display:'flex', gap:10, marginTop:15, marginBottom:15}}>
+                                <div style={{flex:1}}>
+                                    <label style={{fontSize:'0.75rem', color:'var(--text-dim)', display:'block', marginBottom:5, fontWeight:800}}>🎵 유튜브 음원 링크</label>
+                                    <input id="new-youtube-music" placeholder="https://youtu.be/..." style={{width:'100%', padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white'}} />
+                                </div>
+                                <div style={{flex:1}}>
+                                    <label style={{fontSize:'0.75rem', color:'var(--text-dim)', display:'block', marginBottom:5, fontWeight:800}}>🎹 유튜브 MR 링크</label>
+                                    <input id="new-youtube-mr" placeholder="https://youtu.be/..." style={{width:'100%', padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white'}} />
+                                </div>
+                            </div>
                             <button className="btn btn-primary" style={{width:'100%', marginTop:10}} onClick={()=>{
                                 const t = document.getElementById('new-title').value.trim();
                                 const l = document.getElementById('new-lyrics').value.trim();
+                                const yMusic = document.getElementById('new-youtube-music').value.trim();
+                                const yMr = document.getElementById('new-youtube-mr').value.trim();
                                 if(!t) return alert("제목을 입력하세요.");
+                                const newSongObj = {
+                                    title: t,
+                                    lyrics: l,
+                                    youtubeUrl: yMusic,
+                                    youtubeMrUrl: yMr,
+                                    createdAt: Date.now(),
+                                    updatedAt: Date.now()
+                                };
                                 setLibrary(prev => {
-                                    const existing = prev[t];
-                                    return {
+                                    const updated = {
                                         ...prev,
-                                        [t]: {
-                                            title: t,
-                                            lyrics: l,
-                                            createdAt: existing ? (existing.createdAt || Date.now()) : Date.now(),
-                                            updatedAt: Date.now()
-                                        }
+                                        [t]: newSongObj
                                     };
+                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(updated));
+                                    uploadToDB(updated);
+                                    return updated;
                                 });
                                 document.getElementById('new-title').value = '';
                                 document.getElementById('new-lyrics').value = '';
-                                showToast("✨ 보관함에 새 찬양이 저장되었습니다!");
-                            }}>보관함에 추가</button>
+                                document.getElementById('new-youtube-music').value = '';
+                                document.getElementById('new-youtube-mr').value = '';
+                                showToast("✨ 보관함 및 클라우드 DB에 새 찬양이 저장되었습니다!");
+                            }}>보관함 및 클라우드 DB에 저장</button>
 
                             <div style={{marginTop:'3rem', marginBottom:15, display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:10}}>
                                 <h3 style={{fontWeight:900, margin:0}}>보관함 목록 ({Object.keys(library).length})</h3>
@@ -1345,12 +2106,69 @@
                                     <div key={t} className="slot-card" style={{padding:'10px 14px', borderStyle:'solid', minHeight:'60px', cursor:'pointer', position:'relative', display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'flex-start', background: 'rgba(255, 255, 255, 0.02)', borderColor: 'var(--border)'}} onClick={()=>{
                                         document.getElementById('new-title').value = library[t].title;
                                         document.getElementById('new-lyrics').value = library[t].lyrics;
+                                        document.getElementById('new-youtube-music').value = library[t].youtubeUrl || '';
+                                        document.getElementById('new-youtube-mr').value = library[t].youtubeMrUrl || '';
                                         window.scrollTo({ top: 300, behavior: 'smooth' });
                                     }}>
-                                        <div style={{fontWeight:900, fontSize:'0.85rem', color:'white', width:'80%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t}</div>
-                                        <div style={{fontSize:'0.7rem', color:'var(--text-dim)', marginTop:'4px', width:'80%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
-                                            {(library[t].lyrics || '').split('\n')[0] || '가사 없음'}
-                                        </div>
+                                        <div style={{fontWeight:900, fontSize:'0.9rem', color:'white', width:'75%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t}</div>
+                                        {(library[t].youtubeUrl || library[t].youtubeMrUrl) && (
+                                            <div style={{display:'flex', gap:6, marginTop:8, zIndex:12, position:'relative'}}>
+                                                {library[t].youtubeUrl && (
+                                                    <span 
+                                                        onClick={(e)=>{
+                                                            e.stopPropagation();
+                                                            const vid = getYoutubeId(library[t].youtubeUrl);
+                                                            if (vid) {
+                                                                setActiveYoutubeType('음원');
+                                                                setActiveYoutubeId(vid);
+                                                                setShowYoutubePlayer(true);
+                                                            }
+                                                        }}
+                                                        style={{
+                                                            background: 'rgba(239, 68, 68, 0.15)',
+                                                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                                                            color: '#ef4444',
+                                                            borderRadius: '6px',
+                                                            padding: '2px 8px',
+                                                            fontSize: '0.7rem',
+                                                            fontWeight: 800,
+                                                            cursor: 'pointer',
+                                                            display: 'inline-flex', alignItems: 'center', gap: 4
+                                                        }}
+                                                        title="찬양 음원 재생"
+                                                    >
+                                                        음원 🎥
+                                                    </span>
+                                                )}
+                                                {library[t].youtubeMrUrl && (
+                                                    <span 
+                                                        onClick={(e)=>{
+                                                            e.stopPropagation();
+                                                            const vid = getYoutubeId(library[t].youtubeMrUrl);
+                                                            if (vid) {
+                                                                setActiveYoutubeType('MR');
+                                                                setActiveYoutubeId(vid);
+                                                                setShowYoutubePlayer(true);
+                                                            }
+                                                        }}
+                                                        style={{
+                                                            background: 'rgba(139, 92, 246, 0.15)',
+                                                            border: '1px solid rgba(139, 92, 246, 0.3)',
+                                                            color: '#a78bfa',
+                                                            borderRadius: '6px',
+                                                            padding: '2px 8px',
+                                                            fontSize: '0.7rem',
+                                                            fontWeight: 800,
+                                                            cursor: 'pointer',
+                                                            display: 'inline-flex', alignItems: 'center', gap: 4
+                                                        }}
+                                                        title="MR 반주 재생"
+                                                    >
+                                                        MR 🎹
+                                                    </span>
+                                                )}
+                                            </div>
+                                        )}
                                         <button 
                                             style={{
                                                 position:'absolute', right:'12px', top:'50%', transform:'translateY(-50%)',
@@ -1579,12 +2397,266 @@
                             </div>
                         </div>
                     )}
+
+                    {showHistoryModal && (
+                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setShowHistoryModal(false); }}>
+                            <div className="modal-box" style={{ maxWidth: '650px', width: '90%' }} onClick={e=>e.stopPropagation()}>
+                                <h3 style={{textAlign:'center', marginBottom:15, fontWeight:900, display:'flex', alignItems:'center', justifyContent:'center', gap:8}}>
+                                    <i data-lucide="history" style={{color:'var(--primary)'}}></i> 선곡 히스토리 기록
+                                </h3>
+
+                                <div style={{display:'flex', gap:10, marginBottom:15, background:'rgba(255,255,255,0.02)', padding:10, borderRadius:12, border:'1px solid var(--border)', justifyContent:'space-between', alignItems:'center'}}>
+                                    <span style={{fontSize:'0.8rem', color:'var(--text-dim)', fontWeight:700}}>💾 수동 파일 백업 관리</span>
+                                    <div style={{display:'flex', gap:8, alignItems:'center'}}>
+                                        <button 
+                                            className="btn btn-outline" 
+                                            onClick={exportHistoryToFile}
+                                            style={{padding:'6px 12px', fontSize:'0.75rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:8, height:'auto'}}
+                                        >
+                                            전체 백업 다운로드
+                                        </button>
+                                        <label 
+                                            className="btn" 
+                                            style={{padding:'6px 12px', fontSize:'0.75rem', background:'var(--primary)', color:'white', borderRadius:8, height:'auto', cursor:'pointer', display:'inline-flex', alignItems:'center'}}
+                                        >
+                                            백업 가져오기
+                                            <input 
+                                                type="file" 
+                                                accept=".json" 
+                                                onChange={importHistoryFromFile} 
+                                                style={{display:'none'}} 
+                                            />
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div style={{position:'relative', marginBottom:15}}>
+                                    <input 
+                                        type="text"
+                                        placeholder="날짜(YYYY-MM-DD) 또는 찬양 곡 제목으로 검색..."
+                                        value={historySearchQuery}
+                                        onChange={(e) => setHistorySearchQuery(e.target.value)}
+                                        style={{width:'100%', padding:'10px 12px', paddingRight:'35px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, color:'white', fontSize:'0.85rem', outline:'none'}}
+                                    />
+                                    {historySearchQuery && (
+                                        <button 
+                                            onClick={() => setHistorySearchQuery('')}
+                                            style={{position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', background:'none', border:'none', color:'var(--text-dim)', cursor: 'pointer', fontSize:'1rem', display:'flex', alignItems:'center', justifyContent:'center'}}
+                                        >
+                                            &times;
+                                        </button>
+                                    )}
+                                </div>
+                                
+                                <div style={{maxHeight:'320px', overflowY:'auto', paddingRight:'6px', marginBottom:'20px'}}>
+                                    {(() => {
+                                        const filteredHistoryList = historyList.filter(item => {
+                                            if (!historySearchQuery.trim()) return true;
+                                            const query = historySearchQuery.toLowerCase();
+                                            if (item.date.toLowerCase().includes(query)) return true;
+                                            if (Array.isArray(item.slots)) {
+                                                return item.slots.some(s => s && s.song && s.song.title.toLowerCase().includes(query));
+                                            }
+                                            return false;
+                                        });
+
+                                        if (filteredHistoryList.length === 0) {
+                                            return (
+                                                <div style={{textAlign:'center', color:'var(--text-dim)', padding:'40px 0'}}>
+                                                    <i data-lucide="info" style={{width:24, height:24, marginBottom:8, opacity:0.5}}></i>
+                                                    <p style={{fontSize:'0.9rem'}}>검색 결과 또는 저장된 선곡 히스토리가 없습니다.</p>
+                                                </div>
+                                            );
+                                        }
+
+                                        return filteredHistoryList.map(item => {
+                                            const slotNames = ["오프닝 1", "오프닝 2", "오프닝 3", "성찬/특별", "말씀전", "마지막"];
+                                            const hasActiveSlots = Array.isArray(item.slots) && item.slots.some(Boolean);
+                                            return (
+                                                <div key={item.date} style={{background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:12, padding:15, marginBottom:10, display:'flex', justifyContent:'space-between', alignItems:'center', gap:10}}>
+                                                    <div style={{flex: 1}}>
+                                                        <div style={{fontWeight:900, fontSize:'0.95rem', color:'white', marginBottom:6}}>
+                                                            📅 {item.date}
+                                                        </div>
+                                                        <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
+                                                            {!hasActiveSlots ? (
+                                                                <span style={{fontSize:'0.75rem', color:'var(--text-dim)'}}>비어 있음</span>
+                                                            ) : (
+                                                                Array.isArray(item.slots) && item.slots.map((s, idx) => {
+                                                                    if (!s) return null;
+                                                                    return (
+                                                                        <span key={idx} style={{fontSize:'0.7rem', background:'rgba(192, 132, 252, 0.08)', border:'1px solid rgba(192, 132, 252, 0.2)', color:'var(--primary)', padding:'4px 8px', borderRadius:6, fontWeight:800, display:'inline-flex', alignItems:'center', gap:'4px'}}>
+                                                                            <span style={{opacity:0.6, fontSize:'0.65rem'}}>{slotNames[idx]} :</span> {s.song.title}
+                                                                            {s.song.youtubeUrl && (
+                                                                                <span 
+                                                                                    onClick={(e)=>{
+                                                                                        e.stopPropagation();
+                                                                                        const vid = getYoutubeId(s.song.youtubeUrl);
+                                                                                        if(vid) { setActiveYoutubeType('음원'); setActiveYoutubeId(vid); setShowYoutubePlayer(true); }
+                                                                                    }}
+                                                                                    style={{cursor:'pointer', color:'#ef4444', marginLeft:2}}
+                                                                                    title="음원 듣기"
+                                                                                >
+                                                                                    🎥
+                                                                                </span>
+                                                                            )}
+                                                                            {s.song.youtubeMrUrl && (
+                                                                                <span 
+                                                                                    onClick={(e)=>{
+                                                                                        e.stopPropagation();
+                                                                                        const vid = getYoutubeId(s.song.youtubeMrUrl);
+                                                                                        if(vid) { setActiveYoutubeType('MR'); setActiveYoutubeId(vid); setShowYoutubePlayer(true); }
+                                                                                    }}
+                                                                                    style={{cursor:'pointer', color:'#a78bfa', marginLeft:2}}
+                                                                                    title="MR 듣기"
+                                                                                >
+                                                                                    🎹
+                                                                                </span>
+                                                                            )}
+                                                                        </span>
+                                                                    );
+                                                                })
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                    <div style={{display:'flex', gap:6}}>
+                                                        <button 
+                                                            className="btn" 
+                                                            onClick={()=>loadHistoryToSlots(item)}
+                                                            style={{
+                                                                padding:'6px 12px', fontSize:'0.75rem', background:'var(--primary)', color:'white', borderRadius:8, height:'auto'
+                                                            }}
+                                                        >
+                                                            불러오기
+                                                        </button>
+                                                        <button 
+                                                            className="btn" 
+                                                            onClick={()=>deleteHistoryFromDB(item.date)}
+                                                            style={{
+                                                                padding:'6px 12px', fontSize:'0.75rem', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.2)', color:'var(--danger)', borderRadius:8, height:'auto'
+                                                            }}
+                                                        >
+                                                            삭제
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        });
+                                    })()}
+                                </div>
+
+                                <button className="btn btn-outline" style={{width:'100%', padding:'10px', fontSize:'0.85rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:12}} onClick={() => setShowHistoryModal(false)}>
+                                    닫기
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    <footer style={{marginTop:'40px', paddingTop:'20px', borderTop:'1px solid var(--border)', display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:'0.75rem', color:'var(--text-dim)', flexWrap:'wrap', gap:10}}>
+                        <span>PraiseFlow PRO Smart Worship PPT System</span>
+                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.3.0</span>
+                    </footer>
+
+                    {showYoutubePlayer && activeYoutubeId && (
+                        <div style={{
+                            position: 'fixed',
+                            bottom: '20px',
+                            right: '20px',
+                            width: '380px',
+                            height: '260px',
+                            background: 'rgba(25, 25, 25, 0.88)',
+                            backdropFilter: 'blur(16px)',
+                            border: '1px solid rgba(255, 255, 255, 0.1)',
+                            borderRadius: '18px',
+                            boxShadow: '0 12px 40px rgba(0, 0, 0, 0.6)',
+                            zIndex: 99999,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            overflow: 'hidden',
+                            animation: 'fadeIn 0.3s ease-out'
+                        }}>
+                            <div style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                padding: '10px 14px',
+                                background: 'rgba(0, 0, 0, 0.5)',
+                                borderBottom: '1px solid rgba(255, 255, 255, 0.08)'
+                            }}>
+                                <span style={{fontSize: '0.8rem', color: 'white', fontWeight: 900, display: 'flex', alignItems: 'center', gap: 6}}>
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" style={{color: activeYoutubeType === 'MR' ? '#a78bfa' : '#ef4444'}}>
+                                        <path d="M23.498 6.163c-.272-.98-1.09-1.755-2.127-2.026C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.37.537c-1.037.27-1.855 1.047-2.128 2.026C0 8.002 0 12 0 12s0 3.998.502 5.837c.273.98.109 1.739 1.146 2.01 1.871.537 9.37.537 9.37.537s7.5 0 9.37-.537c1.037-.27 1.856-1.03 2.128-2.01C24 15.998 24 12 24 12s0-3.998-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                                    </svg>
+                                    {activeYoutubeType === 'MR' ? '찬양 MR 들어보기' : '찬양 음원 들어보기'}
+                                </span>
+                                <div style={{display:'flex', alignItems:'center', gap:10}}>
+                                    <a 
+                                        href={`https://www.youtube.com/watch?v=${activeYoutubeId}`} 
+                                        target="_blank" 
+                                        style={{textDecoration:'none', color:'var(--primary)', fontSize:'0.75rem', fontWeight:800, display:'flex', alignItems:'center', gap:4, background:'rgba(255,255,255,0.05)', padding:'3px 8px', borderRadius:6, border:'1px solid rgba(255,255,255,0.1)'}}
+                                        title="유튜브 웹사이트 새창에서 열기"
+                                    >
+                                        새창으로 열기 ↗
+                                    </a>
+                                    <button 
+                                        onClick={() => { setShowYoutubePlayer(false); setActiveYoutubeId(null); }}
+                                        style={{background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '1.3rem', padding: 0, fontWeight: 900, display: 'flex', alignItems: 'center'}}
+                                        title="플레이어 닫기"
+                                    >
+                                        &times;
+                                    </button>
+                                </div>
+                            </div>
+                            <div style={{flex: 1, background: 'black'}}>
+                                <iframe 
+                                    width="100%" 
+                                    height="100%" 
+                                    src={`https://www.youtube.com/embed/${activeYoutubeId}?autoplay=1`} 
+                                    title="YouTube audio player" 
+                                    frameBorder="0" 
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                                    allowFullScreen
+                                ></iframe>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
 
+        class ErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { hasError: false, error: null, errorInfo: null };
+            }
+            componentDidCatch(error, errorInfo) {
+                this.setState({ hasError: true, error: error, errorInfo: errorInfo });
+            }
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div style={{ padding: '30px', background: '#7f1d1d', color: 'white', minHeight: '100vh', fontFamily: 'monospace', overflow: 'auto', zIndex: 999999, position: 'relative' }}>
+                            <h2 style={{ fontSize: '1.6rem', fontWeight: 900, marginBottom: '15px' }}>🚨 React 런타임 오류 감지 (Error Boundary)</h2>
+                            <p style={{ fontSize: '1.2rem', fontWeight: 700, color: '#fca5a5', marginBottom: '20px' }}>
+                                {this.state.error && this.state.error.toString()}
+                            </p>
+                            <h3 style={{ marginTop: '20px', fontWeight: 900, color: '#fcd34d' }}>에러 스택 트레이스 (오류 원인):</h3>
+                            <pre style={{ background: 'rgba(0,0,0,0.3)', padding: '15px', borderRadius: '10px', whiteSpace: 'pre-wrap', fontSize: '0.85rem', lineHeight: 1.4 }}>
+                                {this.state.error && this.state.error.stack}
+                            </pre>
+                            <h3 style={{ marginTop: '20px', fontWeight: 900, color: '#fcd34d' }}>컴포넌트 스택 (에러 발생 위치):</h3>
+                            <pre style={{ background: 'rgba(0,0,0,0.3)', padding: '15px', borderRadius: '10px', whiteSpace: 'pre-wrap', fontSize: '0.85rem', lineHeight: 1.4 }}>
+                                {this.state.errorInfo && this.state.errorInfo.componentStack}
+                            </pre>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        root.render(<ErrorBoundary><App /></ErrorBoundary>);
     </script>
 </body>
 </html>

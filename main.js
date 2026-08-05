@@ -15,6 +15,9 @@ function createWindow() {
 
     // Load the local index.html file
     win.loadFile(path.join(__dirname, 'index.html'));
+    
+    // 개발자 도구 강제 오픈
+    win.webContents.openDevTools();
 }
 
 app.whenReady().then(() => {
