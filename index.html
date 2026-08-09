@@ -189,6 +189,87 @@
             // 외부 송출창 팝업 윈도우 인스턴스 보관 상태 (단일 화면 시 강제 자동 닫기를 위해 보관)
             const [presenterWindow, setPresenterWindow] = useState(null);
 
+            // 확장 모니터 1, 2, 3번 선택 모달 제어 및 감지 모니터 상태
+            const [showMonitorModal, setShowMonitorModal] = useState(false);
+            const [selectedMonitor, setSelectedMonitor] = useState(null);
+            const [detectedMonitors, setDetectedMonitors] = useState([
+                {
+                    id: 1,
+                    label: '확장 모니터 1번 (예배당 메인 프로젝터 / LED)',
+                    left: (window.screen.availLeft || 0) + window.screen.width,
+                    top: window.screen.availTop || 0,
+                    width: 1920,
+                    height: 1080,
+                    isPrimary: false
+                },
+                {
+                    id: 2,
+                    label: '확장 모니터 2번 (자막 전용 / OBS 크로마키)',
+                    left: (window.screen.availLeft || 0) + (window.screen.width * 2),
+                    top: window.screen.availTop || 0,
+                    width: 1920,
+                    height: 1080,
+                    isPrimary: false
+                },
+                {
+                    id: 3,
+                    label: '확장 모니터 3번 (목사님 프롬프터 / 성가대 모니터)',
+                    left: window.screen.availLeft || 0,
+                    top: (window.screen.availTop || 0) + window.screen.height,
+                    width: 1920,
+                    height: 1080,
+                    isPrimary: false
+                }
+            ]);
+
+            // 실제 디스플레이 API 감지 함수
+            const fetchRealMonitors = async () => {
+                const getScreenDetailsFn = window.getScreenDetails || (navigator.screen && navigator.screen.getScreenDetails);
+                if (typeof getScreenDetailsFn === 'function') {
+                    try {
+                        const screenDetails = await getScreenDetailsFn();
+                        if (screenDetails && screenDetails.screens && screenDetails.screens.length > 0) {
+                            const parsed = screenDetails.screens.map((scr, idx) => ({
+                                id: idx + 1,
+                                label: `${scr.isPrimary ? '[메인 모니터] ' : `[확장 모니터 ${idx}] `}${scr.label || `디스플레이 ${idx + 1}`}`,
+                                left: scr.availLeft ?? scr.left,
+                                top: scr.availTop ?? scr.top,
+                                width: scr.availWidth ?? scr.width,
+                                height: scr.availHeight ?? scr.height,
+                                isPrimary: scr.isPrimary
+                            }));
+                            setDetectedMonitors(parsed);
+                            showToast("✅ 연결된 실제 확장 모니터를 감지했습니다!");
+                            return;
+                        }
+                    } catch (err) {
+                        console.warn("다중 모니터 권한 거부 또는 감지 실패:", err);
+                    }
+                }
+                showToast("ℹ️ 브라우저 기본 1, 2, 3번 확장 모니터 좌표 프리셋을 사용합니다.");
+            };
+
+            // 선택 모니터로 송출창 구동
+            const handleOpenPresenterOnMonitor = (targetMonitor) => {
+                if (presenterWindow && !presenterWindow.closed) {
+                    try { presenterWindow.close(); } catch(e){}
+                }
+
+                const left = targetMonitor.left;
+                const top = targetMonitor.top;
+                const width = targetMonitor.width || 1920;
+                const height = targetMonitor.height || 1080;
+
+                const windowFeatures = `left=${left},top=${top},width=${width},height=${height},menubar=no,toolbar=no,location=no,status=no,resizable=yes`;
+                const win = window.open('?mode=presenter', 'PraiseFlowPresenter', windowFeatures);
+                setPresenterWindow(win);
+                setSelectedMonitor(targetMonitor);
+                setExternalPresent(true);
+                setShowMonitorModal(false);
+
+                showToast(`🖥️ 확장 모니터 #${targetMonitor.id}번(${targetMonitor.label})으로 송출창을 열었습니다!`);
+            };
+
             // 최신 상태를 리스너 클로저 문제 없이 즉시 조회하기 위한 useRef 보관 (로컬 file:// 통신 및 팝업 연동용)
             const liveSlideRef = React.useRef(null);
             const activePointerRef = React.useRef({ slotIdx: -1, blockIdx: -1 });
@@ -1738,15 +1819,23 @@
                             <button className="btn" style={{background:'#022c22', color:'#34d399', border:'1px solid #065f46'}} onClick={handleControllerShareLink}>
                                 <i data-lucide="edit-3"></i> ✏️ 공동 편집 링크 복사
                             </button>
-                            <label style={{display:'flex', alignItems:'center', gap:'8px', cursor:'pointer', background:'rgba(255,255,255,0.05)', padding:'8px 16px', borderRadius:'12px', border:'1px solid var(--border)', fontSize:'0.9rem', fontWeight:800}}>
-                                <input type="checkbox" checked={externalPresent} onChange={(e)=>setExternalPresent(e.target.checked)} style={{cursor:'pointer', accentColor:'var(--primary)', width:16, height:16}} />
-                                🖥️ 외부 송출창 연동
-                            </label>
+                            <button 
+                                className="btn" 
+                                style={{
+                                    background: externalPresent ? 'linear-gradient(135deg, #4f46e5, #7c3aed)' : 'rgba(255,255,255,0.05)', 
+                                    color: 'white', 
+                                    border: externalPresent ? '1px solid #a78bfa' : '1px solid var(--border)',
+                                    fontWeight: 800
+                                }} 
+                                onClick={() => setShowMonitorModal(true)}
+                            >
+                                <i data-lucide="monitor"></i> 🖥️ 외부 송출창 연동 (모니터 1, 2, 3번 선택)
+                            </button>
                             {externalPresent && (
-                                <div style={{display:'flex', gap:'8px'}}>
-                                    <button className="btn btn-primary" onClick={handleOpenPresenter}>
-                                        <i data-lucide="monitor"></i> 송출창 열기
-                                    </button>
+                                <div style={{display:'flex', gap:'8px', alignItems:'center'}}>
+                                    <span style={{fontSize:'0.75rem', background:'rgba(16, 185, 129, 0.2)', border:'1px solid rgba(16, 185, 129, 0.4)', color:'#34d399', padding:'4px 10px', borderRadius:'8px', fontWeight:800}}>
+                                        {selectedMonitor ? `확장 #${selectedMonitor.id}번 송출 중` : '송출 가동 중'}
+                                    </span>
                                     <button className="btn" style={{background:'#7f1d1d', color:'#fca5a5', border:'1px solid #991b1b'}} onClick={handleClosePresenter}>
                                         <i data-lucide="monitor-off"></i> 송출창 닫기
                                     </button>
@@ -2546,6 +2635,98 @@
                                 </div>
 
                                 <button className="btn btn-outline" style={{width:'100%', padding:'10px', fontSize:'0.85rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:12}} onClick={() => setShowHistoryModal(false)}>
+                                    닫기
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {showMonitorModal && (
+                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setShowMonitorModal(false); }}>
+                            <div className="modal-box" style={{ maxWidth: '850px', width: '95%', padding: '2rem' }} onClick={e=>e.stopPropagation()}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'1px solid var(--border)', paddingBottom:'15px', marginBottom:'20px', flexWrap:'wrap', gap:'10px'}}>
+                                    <div>
+                                        <h3 style={{fontSize:'1.25rem', fontWeight:900, color:'white', display:'flex', alignItems:'center', gap:'10px', margin:0}}>
+                                            🖥️ 외부 송출 모니터 선택 (1번, 2번, 3번)
+                                        </h3>
+                                        <p style={{fontSize:'0.8rem', color:'var(--text-dim)', margin:'4px 0 0 0'}}>
+                                            송출할 확장 모니터를 선택하세요. 해당 화면 위치로 프레젠테이션 송출창이 자동 배치됩니다.
+                                        </p>
+                                    </div>
+                                    <button 
+                                        className="btn btn-outline"
+                                        onClick={fetchRealMonitors}
+                                        style={{fontSize:'0.75rem', padding:'6px 12px', background:'rgba(192, 132, 252, 0.1)', color:'var(--primary)', border:'1px solid rgba(192, 132, 252, 0.3)', borderRadius:8}}
+                                    >
+                                        🔄 실제 모니터 감지
+                                    </button>
+                                </div>
+
+                                <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(240px, 1fr))', gap:'15px', marginBottom:'20px'}}>
+                                    {detectedMonitors.map((mon) => {
+                                        const isSelected = selectedMonitor?.id === mon.id && presenterWindow && !presenterWindow.closed;
+                                        return (
+                                            <div 
+                                                key={mon.id}
+                                                style={{
+                                                    background: isSelected ? 'rgba(192, 132, 252, 0.12)' : 'rgba(255,255,255,0.03)',
+                                                    border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border)',
+                                                    borderRadius: '20px',
+                                                    padding: '1.25rem',
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                    justifyContent: 'space-between',
+                                                    gap: '12px'
+                                                }}
+                                            >
+                                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                                    <span style={{fontSize:'0.75rem', fontWeight:800, background:'rgba(255,255,255,0.1)', padding:'4px 10px', borderRadius:'10px', color:'var(--primary)'}}>
+                                                        모니터 #{mon.id}
+                                                    </span>
+                                                    {mon.isPrimary && (
+                                                        <span style={{fontSize:'0.65rem', background:'rgba(245, 158, 11, 0.2)', border:'1px solid rgba(245, 158, 11, 0.4)', color:'#fbbf24', padding:'2px 6px', borderRadius:'6px'}}>
+                                                            주 모니터
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                <div style={{textAlign:'center', padding:'15px 10px', background:'rgba(0,0,0,0.3)', borderRadius:'14px', border:'1px solid rgba(255,255,255,0.05)'}}>
+                                                    <div style={{fontSize:'2rem', marginBottom:'6px'}}>📺</div>
+                                                    <div style={{fontWeight:800, fontSize:'0.9rem', color:'white', marginBottom:'4px'}}>{mon.label}</div>
+                                                    <div style={{fontSize:'0.7rem', color:'var(--text-dim)', fontFamily:'monospace'}}>
+                                                        {mon.width} x {mon.height} (X: {mon.left}px, Y: {mon.top}px)
+                                                    </div>
+                                                </div>
+
+                                                <button
+                                                    className="btn btn-primary"
+                                                    onClick={() => handleOpenPresenterOnMonitor(mon)}
+                                                    style={{
+                                                        width: '100%',
+                                                        padding: '10px',
+                                                        fontSize: '0.85rem',
+                                                        fontWeight: 800,
+                                                        background: isSelected ? '#10b981' : 'var(--primary)',
+                                                        borderColor: isSelected ? '#059669' : 'var(--primary)',
+                                                        borderRadius: '12px'
+                                                    }}
+                                                >
+                                                    {isSelected ? '✅ 현재 송출 중' : `🖥️ 확장 ${mon.id}번으로 송출`}
+                                                </button>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                <div style={{background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', padding:'12px 16px', borderRadius:'14px', fontSize:'0.75rem', color:'var(--text-dim)', marginBottom:'20px'}}>
+                                    💡 <strong>사용 안내:</strong> 1번, 2번, 3번 모니터를 선택하면 해당 확장 디스플레이 위치로 16:9 자막 송출창이 자동 배치됩니다. 팝업창에서 [F11] 키를 눌러 전체화면으로 전환할 수 있습니다.
+                                </div>
+
+                                <button 
+                                    className="btn btn-outline" 
+                                    style={{width:'100%', padding:'10px', fontSize:'0.85rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:12}} 
+                                    onClick={() => setShowMonitorModal(false)}
+                                >
                                     닫기
                                 </button>
                             </div>
