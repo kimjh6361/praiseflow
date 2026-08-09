@@ -352,8 +352,9 @@
             });
             // 자동 로드 무한 루프 방지용 Ref
             const lastAutoLoadedTagRef = React.useRef('');
-            // MQTT 클라이언트 객체 보관용 Ref
+            // MQTT 클라이언트 객체 및 고유 클라이언트 ID 보관용 Ref
             const mqttClientRef = React.useRef(null);
+            const myClientIdRef = React.useRef('client_' + Math.random().toString(36).substring(2, 11));
 
             // 글로벌 외부 네트워크 (LTE / 5G / 타지 Wi-Fi 등) 실시간 동기화용 MQTT WebSocket 커넥션 클라이언트 가동
             useEffect(() => {
@@ -362,7 +363,7 @@
                     return;
                 }
 
-                const clientId = 'client_' + Math.random().toString(36).substring(2, 11);
+                const clientId = myClientIdRef.current;
                 // HiveMQ 글로벌 공용 브로커에 암호화 웹소켓(wss)을 통해 보안 접속 처리 (포트 8884)
                 const client = new window.Paho.MQTT.Client('broker.hivemq.com', 8884, '/mqtt', clientId);
                 mqttClientRef.current = client;
@@ -384,6 +385,12 @@
                 client.onMessageArrived = (message) => {
                     try {
                         const packet = JSON.parse(message.payloadString);
+
+                        // 내가 보낸 패킷은 수신 처리에서 제외하여 에코로 인한 무한 루프 및 중복 토스트 방지
+                        if (packet.senderId && packet.senderId === myClientIdRef.current) {
+                            return;
+                        }
+
                         // 외부망을 통해 뷰어 모바일 기기들에게 신호가 도착하면, 실시간으로 가사 화면 갱신 수행
                         if (mode === 'viewer') {
                             if (packet.type === 'UPDATE_SLIDE') {
@@ -402,11 +409,24 @@
                                 }
                             }
                             if (packet.type === 'SYNC_FULL_LIBRARY_PAYLOAD' && packet.payload && typeof packet.payload === 'object') {
-                                const count = Object.keys(packet.payload).length;
-                                if (count > 0) {
-                                    setLibrary(packet.payload);
-                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(packet.payload));
-                                    showToast(`⚡ 연결된 클라우드 기기로부터 찬양 보관함(${count}곡)이 실시간 동기화되었습니다!`);
+                                let curLocal = {};
+                                try {
+                                    curLocal = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
+                                } catch(e) {}
+
+                                const incomingTitles = Object.keys(packet.payload);
+                                let hasNewSong = false;
+                                incomingTitles.forEach(t => {
+                                    if (!curLocal[t] || JSON.stringify(curLocal[t]) !== JSON.stringify(packet.payload[t])) {
+                                        curLocal[t] = packet.payload[t];
+                                        hasNewSong = true;
+                                    }
+                                });
+
+                                if (hasNewSong) {
+                                    setLibrary(curLocal);
+                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(curLocal));
+                                    showToast(`⚡ 연결된 클라우드 기기로부터 찬양 보관함(${incomingTitles.length}곡)이 실시간 동기화되었습니다!`);
                                 }
                             }
 
@@ -427,18 +447,23 @@
 
                                     const mergedMap = {};
                                     curLocal.forEach(h => { if(h && h.date) mergedMap[h.date] = h; });
+                                    let hasNewHistory = false;
                                     incoming.forEach(h => {
                                         if (h && h.date) {
-                                            if (!mergedMap[h.date] || (h.updatedAt || 0) >= (mergedMap[h.date].updatedAt || 0)) {
+                                            const existing = mergedMap[h.date];
+                                            if (!existing || (h.updatedAt || 0) > (existing.updatedAt || 0)) {
                                                 mergedMap[h.date] = h;
+                                                hasNewHistory = true;
                                             }
                                         }
                                     });
 
-                                    const mergedList = Object.values(mergedMap).sort((a, b) => b.date.localeCompare(a.date));
-                                    setHistoryList(mergedList);
-                                    localStorage.setItem('praise_flow_history', JSON.stringify(mergedList));
-                                    showToast(`⚡ 연결된 클라우드 기기로부터 ${mergedList.length}개 날짜 선곡 기록이 실시간 공유되었습니다!`);
+                                    if (hasNewHistory) {
+                                        const mergedList = Object.values(mergedMap).sort((a, b) => b.date.localeCompare(a.date));
+                                        setHistoryList(mergedList);
+                                        localStorage.setItem('praise_flow_history', JSON.stringify(mergedList));
+                                        showToast(`⚡ 연결된 클라우드 기기로부터 ${mergedList.length}개 날짜 선곡 기록이 실시간 공유되었습니다!`);
+                                    }
                                 }
                             }
 
@@ -449,8 +474,15 @@
                                 }
                             }
                             if (packet.type === 'SYNC_FULL_SLOTS_PAYLOAD' && Array.isArray(packet.payload) && packet.payload.some(Boolean)) {
-                                setSlots(packet.payload);
-                                localStorage.setItem('praise_flow_slots', JSON.stringify(packet.payload));
+                                let curSlots = [];
+                                try {
+                                    curSlots = JSON.parse(localStorage.getItem('praise_flow_slots') || '[]');
+                                } catch(e) {}
+
+                                if (JSON.stringify(curSlots) !== JSON.stringify(packet.payload)) {
+                                    setSlots(packet.payload);
+                                    localStorage.setItem('praise_flow_slots', JSON.stringify(packet.payload));
+                                }
                             }
 
                             if (packet.type === 'UPDATE_DB_LIBRARY') {
@@ -1034,11 +1066,16 @@
                 showToast(`📂 ${historyItem.date} 선곡 리스트를 불러왔습니다!`);
             };
 
-            // MQTT를 활용한 실시간 동기화 시그널 전송
+            // MQTT를 활용한 실시간 동기화 시그널 전송 (자기 자신에게로의 에코 방지를 위해 senderId 함께 전송)
             const sendMqttSignal = (type, payload = null) => {
                 if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
                     try {
-                        const message = new window.Paho.MQTT.Message(JSON.stringify({ type, payload, channelId }));
+                        const message = new window.Paho.MQTT.Message(JSON.stringify({
+                            type,
+                            payload,
+                            channelId,
+                            senderId: myClientIdRef.current
+                        }));
                         message.destinationName = `praiseflow/sync/${channelId}`;
                         mqttClientRef.current.send(message);
                     } catch (e) {
