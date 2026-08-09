@@ -1938,13 +1938,14 @@
 
                     {view === 'planner' ? (
                         <div className="planner-layout" style={{display:'flex', gap:'2rem', flexWrap:'wrap', alignItems:'flex-start'}}>
-                            {/* 좌측: 예배 순서 조작 큐시트 메인 카드 (슬롯 6개 + 날짜별 선곡 아카이브 통합) */}
+                            {/* 좌측: 예배 순서 조작 큐시트 메인 카드 (슬롯 6개) */}
                             <div style={{background:'var(--card-bg)', border:'1px solid var(--border)', padding:'1.5rem', borderRadius:'24px', flex:'1 1 550px', display:'flex', flexDirection:'column', gap:'1.5rem'}}>
                                 <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'1px solid var(--border)', paddingBottom:12, flexWrap:'wrap', gap:10}}>
                                     <h2 style={{fontSize:'1.15rem', color:'var(--primary)', display:'flex', alignItems:'center', gap:8, fontWeight:900, margin:0}}>
                                         <i data-lucide="list-music" style={{width:20}}></i> 예배 순서 조작 큐시트
                                     </h2>
                                     <div style={{display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap'}}>
+                                        <span style={{fontSize:'0.8rem', color:'var(--text-dim)', fontWeight:700}}>예배 날짜:</span>
                                         <input 
                                             type="date" 
                                             value={selectedDate} 
@@ -1977,6 +1978,25 @@
                                             }}
                                         >
                                             <i data-lucide="save" style={{width:14, height:14}}></i> 💾 선곡 저장
+                                        </button>
+                                        <button 
+                                            className="btn" 
+                                            onClick={()=>setShowHistoryModal(true)}
+                                            style={{
+                                                padding: '6px 12px',
+                                                fontSize: '0.8rem',
+                                                fontWeight: 800,
+                                                background: 'rgba(59, 130, 246, 0.15)',
+                                                color: '#60a5fa',
+                                                border: '1px solid rgba(59, 130, 246, 0.35)',
+                                                borderRadius: '8px',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 4,
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            <i data-lucide="calendar" style={{width:14, height:14}}></i> 📜 📅 날짜별 선곡 아카이브 ({historyList.filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT').length})
                                         </button>
                                         <button 
                                             className="btn" 
@@ -2117,132 +2137,6 @@
                                             </div>
                                         );
                                     })}
-                                </div>
-
-                                {/* 큐시트 조작 상자 내부: 날짜별 찬양 선곡 기록 아카이브 섹션 */}
-                                <div style={{
-                                    background: 'rgba(255, 255, 255, 0.02)',
-                                    border: '1px solid rgba(192, 132, 252, 0.25)',
-                                    padding: '1.2rem 1.5rem',
-                                    borderRadius: '20px',
-                                    marginTop: '5px'
-                                }}>
-                                    <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'14px', flexWrap:'wrap', gap:'10px'}}>
-                                        <h3 style={{fontSize:'1rem', color:'var(--primary)', display:'flex', alignItems:'center', gap:8, fontWeight:900, margin:0}}>
-                                            <i data-lucide="calendar" style={{width:18}}></i> 📅 날짜별 예배 선곡 기록 아카이브 (클라우드 실시간 공유)
-                                        </h3>
-                                        <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 10px', borderRadius:'10px', fontWeight:800}}>
-                                            총 {historyList.filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT').length}개 날짜 보관 중
-                                        </span>
-                                    </div>
-
-                                    <div style={{display:'flex', flexDirection:'column', gap:'10px', maxHeight:'340px', overflowY:'auto', paddingRight:'6px'}}>
-                                        {(() => {
-                                            const validHistory = historyList.filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT');
-                                            if (validHistory.length === 0) {
-                                                return (
-                                                    <div style={{textAlign:'center', color:'var(--text-dim)', padding:'30px 0'}}>
-                                                        <i data-lucide="info" style={{width:24, height:24, marginBottom:8, opacity:0.5}}></i>
-                                                        <p style={{fontSize:'0.85rem', margin:0}}>저장된 날짜별 선곡 기록이 없습니다. 상단에서 [선곡 저장] 시 자동으로 클라우드에 기록됩니다.</p>
-                                                    </div>
-                                                );
-                                            }
-
-                                            const slotNames = ["오프닝 1", "오프닝 2", "오프닝 3", "성찬/특별", "말씀전", "마지막"];
-                                            return validHistory.map(item => {
-                                                const isCurrentSelected = item.date === selectedDate;
-                                                const hasActiveSlots = Array.isArray(item.slots) && item.slots.some(Boolean);
-                                                return (
-                                                    <div key={item.date} style={{
-                                                        background: isCurrentSelected ? 'rgba(192, 132, 252, 0.08)' : 'rgba(255,255,255,0.02)',
-                                                        border: isCurrentSelected ? '1px solid rgba(192, 132, 252, 0.4)' : '1px solid var(--border)',
-                                                        borderRadius: '16px',
-                                                        padding: '12px 16px',
-                                                        display: 'flex',
-                                                        justifyContent: 'space-between',
-                                                        alignItems: 'center',
-                                                        gap: '12px',
-                                                        flexWrap: 'wrap'
-                                                    }}>
-                                                        <div style={{flex: 1, minWidth: '220px'}}>
-                                                            <div style={{display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px'}}>
-                                                                <span style={{fontWeight: 900, fontSize: '0.9rem', color: isCurrentSelected ? 'var(--primary)' : 'white'}}>
-                                                                    📅 {item.date}
-                                                                </span>
-                                                                {isCurrentSelected && (
-                                                                    <span style={{fontSize: '0.65rem', background: 'var(--primary)', color: 'white', padding: '2px 6px', borderRadius: '6px', fontWeight: 800}}>
-                                                                        현재 큐시트
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <div style={{display: 'flex', gap: '5px', flexWrap: 'wrap'}}>
-                                                                {!hasActiveSlots ? (
-                                                                    <span style={{fontSize: '0.75rem', color: 'var(--text-dim)'}}>비어 있음</span>
-                                                                ) : (
-                                                                    Array.isArray(item.slots) && item.slots.map((s, idx) => {
-                                                                        if (!s) return null;
-                                                                        return (
-                                                                            <span key={idx} style={{
-                                                                                fontSize: '0.7rem',
-                                                                                background: 'rgba(255,255,255,0.04)',
-                                                                                border: '1px solid var(--border)',
-                                                                                color: 'white',
-                                                                                padding: '3px 7px',
-                                                                                borderRadius: '6px',
-                                                                                fontWeight: 800,
-                                                                                display: 'inline-flex',
-                                                                                alignItems: 'center',
-                                                                                gap: '4px'
-                                                                            }}>
-                                                                                <span style={{opacity: 0.6, fontSize: '0.65rem', color: 'var(--primary)'}}>{slotNames[idx]}:</span> {s.song.title}
-                                                                            </span>
-                                                                        );
-                                                                    })
-                                                                )}
-                                                            </div>
-                                                        </div>
-
-                                                        <div style={{display: 'flex', gap: '6px', alignItems: 'center'}}>
-                                                            <button
-                                                                className="btn"
-                                                                onClick={() => {
-                                                                    setSelectedDate(item.date);
-                                                                    loadHistoryToSlots(item);
-                                                                }}
-                                                                style={{
-                                                                    padding: '5px 12px',
-                                                                    fontSize: '0.75rem',
-                                                                    fontWeight: 800,
-                                                                    background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
-                                                                    color: 'white',
-                                                                    borderRadius: '8px',
-                                                                    border: 'none',
-                                                                    cursor: 'pointer'
-                                                                }}
-                                                            >
-                                                                📂 큐시트 적용
-                                                            </button>
-                                                            <button
-                                                                className="btn"
-                                                                onClick={() => deleteHistoryFromDB(item.date)}
-                                                                style={{
-                                                                    padding: '5px 8px',
-                                                                    fontSize: '0.75rem',
-                                                                    background: 'rgba(239, 68, 68, 0.1)',
-                                                                    color: '#f87171',
-                                                                    border: '1px solid rgba(239, 68, 68, 0.3)',
-                                                                    borderRadius: '8px',
-                                                                    cursor: 'pointer'
-                                                                }}
-                                                            >
-                                                                🗑️
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                );
-                                            });
-                                        })()}
-                                    </div>
                                 </div>
                             </div>
 
@@ -2761,10 +2655,13 @@
 
                     {showHistoryModal && (
                         <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setShowHistoryModal(false); }}>
-                            <div className="modal-box" style={{ maxWidth: '650px', width: '90%' }} onClick={e=>e.stopPropagation()}>
-                                <h3 style={{textAlign:'center', marginBottom:15, fontWeight:900, display:'flex', alignItems:'center', justifyContent:'center', gap:8}}>
-                                    <i data-lucide="history" style={{color:'var(--primary)'}}></i> 선곡 히스토리 기록
-                                </h3>
+                            <div className="modal-box" style={{ maxWidth: '680px', width: '92%' }} onClick={e=>e.stopPropagation()}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:15}}>
+                                    <h3 style={{fontWeight:900, fontSize:'1.1rem', color:'var(--primary)', display:'flex', alignItems:'center', gap:8, margin:0}}>
+                                        <i data-lucide="calendar" style={{color:'var(--primary)'}}></i> 📅 날짜별 예배 선곡 기록 아카이브 (클라우드 공유)
+                                    </h3>
+                                    <button onClick={() => setShowHistoryModal(false)} style={{background:'none', border:'none', color:'var(--text-dim)', fontSize:'1.4rem', cursor:'pointer'}}>&times;</button>
+                                </div>
 
                                 <div style={{display:'flex', gap:10, marginBottom:15, background:'rgba(255,255,255,0.02)', padding:10, borderRadius:12, border:'1px solid var(--border)', justifyContent:'space-between', alignItems:'center'}}>
                                     <span style={{fontSize:'0.8rem', color:'var(--text-dim)', fontWeight:700}}>💾 수동 파일 백업 관리</span>
