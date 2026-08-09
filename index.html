@@ -314,17 +314,11 @@
             const [channelId] = useState(() => {
                 const urlParams = new URLSearchParams(window.location.search);
                 const fromUrl = urlParams.get('channel');
-                if (fromUrl) {
-                    localStorage.setItem('praise_flow_fixed_channel', fromUrl);
-                    return fromUrl;
-                }
-                const saved = localStorage.getItem('praise_flow_fixed_channel');
-                if (saved) return saved;
-                
-                const defaultChannel = 'praise_main_channel';
-                localStorage.setItem('praise_flow_fixed_channel', defaultChannel);
-                return defaultChannel;
+                if (fromUrl) return fromUrl;
+                return 'praise_main_channel';
             });
+            // 자동 로드 무한 루프 방지용 Ref
+            const lastAutoLoadedTagRef = React.useRef('');
             // MQTT 클라이언트 객체 보관용 Ref
             const mqttClientRef = React.useRef(null);
 
@@ -1287,31 +1281,26 @@
                 initSync();
             }, [channelId, dbSyncEnabled]);
 
-            // 접속 시 및 날짜 변경 시 해당 날짜의 선곡 목록을 서버 히스토리에서 자동으로 큐시트에 로드
+            // 접속 시 및 날짜 변경 시 해당 날짜의 선곡 목록을 서버 히스토리에서 자동으로 큐시트에 로드 (단 1회 로딩 보장 및 깜빡임 차단)
             useEffect(() => {
                 if (!selectedDate || !Array.isArray(historyList) || historyList.length === 0) return;
                 
                 const matched = historyList.find(h => h.date === selectedDate);
                 if (matched && Array.isArray(matched.slots) && matched.slots.some(Boolean)) {
-                    const currentCleaned = slots.map(slot => {
-                        if (!slot) return null;
-                        return {
-                            song: {
-                                title: slot.song.title,
-                                lyrics: slot.song.lyrics
-                            },
-                            themeUrl: slot.themeUrl
-                        };
+                    const loadTag = selectedDate + '_' + (matched.updatedAt || 0) + '_' + matched.slots.filter(Boolean).length;
+                    if (lastAutoLoadedTagRef.current === loadTag) return;
+
+                    const isAlreadyLoaded = slots.every((s, idx) => {
+                        const m = matched.slots[idx];
+                        if (!s && !m) return true;
+                        if (!s || !m) return false;
+                        return s.song?.title === m.song?.title;
                     });
                     
-                    const isAlreadyLoaded = JSON.stringify(currentCleaned) === JSON.stringify(matched.slots);
-                    
                     if (!isAlreadyLoaded) {
+                        lastAutoLoadedTagRef.current = loadTag;
                         setSlots(matched.slots);
-                        if (supabase && dbSyncEnabled) {
-                            saveSlotsToDB(matched.slots);
-                        }
-                        showToast(`☁️ 인터넷 서버에서 ${selectedDate} 예배 선곡 목록을 자동으로 불러왔습니다!`);
+                        showToast(`☁️ 인터넷 서버에서 ${selectedDate} 예배 선곡 목록을 성공적으로 불러왔습니다!`);
                     }
                 }
             }, [selectedDate, historyList]);
