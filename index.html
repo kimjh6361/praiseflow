@@ -676,23 +676,26 @@
             };
 
             // DB에 전체 보관함 업로드하기 (유튜브 링크 포함 + 2중 통째 클라우드 보장)
-            const uploadToDB = async (customLib = null) => {
+            const uploadToDB = async (customLib = null, silent = false) => {
                 const targetLib = customLib || library;
                 const songTitles = Object.keys(targetLib);
-                if (songTitles.length === 0) return alert("업로드할 곡이 없습니다.");
+                if (songTitles.length === 0) {
+                    if (!silent) alert("업로드할 곡이 없습니다.");
+                    return;
+                }
 
                 // 1. 로컬 저장소 안전 기록
                 localStorage.setItem('praise_flow_f_db', JSON.stringify(targetLib));
 
                 if (!supabase) {
-                    showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
+                    if (!silent) showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
                     return;
                 }
 
                 try {
-                    setIsSyncing(true);
+                    if (!silent) setIsSyncing(true);
 
-                    // 2중 클라우드 보장: praise_history에 통째로 25개 보관함 JSON 스냅샷 저장
+                    // 2중 클라우드 보장: praise_history에 통째로 보관함 JSON 스냅샷 저장
                     await supabase
                         .from('praise_history')
                         .upsert({
@@ -717,13 +720,13 @@
                         .from('praise_songs')
                         .upsert(songsToUpsert, { onConflict: 'channel_id,title' });
 
-                    showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡 및 유튜브 링크가 클라우드에 성공적으로 저장되었습니다!`);
+                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡 및 데이터가 인터넷 서버에 성공적으로 저장되었습니다!`);
                     sendMqttSignal('UPDATE_DB_LIBRARY');
                 } catch (err) {
                     console.error("DB 업로드 예외 보완:", err);
-                    showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 보관소에 안전하게 기록되었습니다!`);
+                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 보관소에 안전하게 기록되었습니다!`);
                 } finally {
-                    setIsSyncing(false);
+                    if (!silent) setIsSyncing(false);
                 }
             };
 
@@ -1148,13 +1151,26 @@
                 }
             };
 
-            // 뷰어 모드가 아닐 때만 로컬 스토리지에 자동 저장 (방문자의 로컬 스토리지 데이터 보호)
+            // 뷰어 모드가 아닐 때 로컬 스토리지 및 인터넷 클라우드 서버(Supabase)에 데이터 자동 저장 (Auto-Save)
             useEffect(() => {
                 if (mode !== 'viewer') {
+                    // 1. 로컬 저장소 안전 기록
                     localStorage.setItem('praise_flow_f_db', JSON.stringify(library));
                     localStorage.setItem('praise_flow_slots', JSON.stringify(slots));
+
+                    // 2. 인터넷 클라우드 서버 디바운스 자동 저장 (0.8초 후 배경 자동 동기화)
+                    if (supabase && dbSyncEnabled) {
+                        const timer = setTimeout(() => {
+                            // 예배 순서 큐시트 선곡 목록 인터넷 서버 자동 저장
+                            saveSlotsToDB(slots);
+                            // 찬양 제작소 보관함 인터넷 서버 자동 저장
+                            uploadToDB(library, true);
+                        }, 800);
+
+                        return () => clearTimeout(timer);
+                    }
                 }
-            }, [library, slots, mode]);
+            }, [library, slots, mode, dbSyncEnabled]);
 
             // 최초 기기 접속 시 데이터 자동 동기화
             useEffect(() => {
@@ -1895,9 +1911,23 @@
                     )}
 
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
-                        <h1 style={{display:'flex', alignItems:'center', gap:'10px'}}>
+                        <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
                             <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.3.0</span>
+                            <span style={{
+                                fontSize:'0.75rem', 
+                                background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
+                                border: isSyncing ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid rgba(16, 185, 129, 0.3)', 
+                                color: isSyncing ? '#fbbf24' : '#34d399', 
+                                padding:'4px 10px', 
+                                borderRadius:'12px', 
+                                fontWeight:800,
+                                display:'inline-flex',
+                                alignItems:'center',
+                                gap:'6px'
+                            }}>
+                                {isSyncing ? '🔄 서버 동기화 중...' : '☁️ 인터넷 서버 자동 저장 활성화'}
+                            </span>
                         </h1>
                         <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
                             <button className="btn" style={{background:'#1e1b4b', color:'#c084fc', border:'1px solid #4338ca'}} onClick={handleShareLink}>
