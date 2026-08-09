@@ -1031,9 +1031,12 @@
                 e.target.value = '';
             };
 
-            // DB에 특정 날짜의 선곡 히스토리 저장
-            const saveHistoryToDB = async (dateStr, slotsToSave) => {
-                if (!dateStr) return alert("날짜를 지정해 주세요.");
+            // DB에 특정 날짜의 선곡 히스토리 저장 (자동 백그라운드 silent 옵션 지원)
+            const saveHistoryToDB = async (dateStr, slotsToSave, silent = false) => {
+                if (!dateStr) {
+                    if (!silent) alert("날짜를 지정해 주세요.");
+                    return;
+                }
                 
                 const cleanedSlots = slotsToSave.map(slot => {
                     if (!slot) return null;
@@ -1065,12 +1068,12 @@
                 localStorage.setItem('praise_flow_history', JSON.stringify(localHistory));
 
                 if (!supabase) {
-                    showToast("💾 로컬 저장소에 선곡이 기록되었습니다 (오프라인)");
+                    if (!silent) showToast("💾 로컬 저장소에 선곡이 기록되었습니다 (오프라인)");
                     return;
                 }
 
                 try {
-                    setIsSyncing(true);
+                    if (!silent) setIsSyncing(true);
                     let { error } = await supabase
                         .from('praise_history')
                         .upsert({
@@ -1080,9 +1083,7 @@
                             updated_at: new Date().toISOString()
                         }, { onConflict: 'channel_id,event_date' });
 
-                    // 1차 upsert 실패 시 Unique constraint 미설정 환경에 대응하는 Safe Fallback (select -> update/insert)
                     if (error) {
-                        console.warn("upsert 1차 시도 미완료, Safe Fallback 진행:", error);
                         const { data: existingRecords } = await supabase
                             .from('praise_history')
                             .select('id')
@@ -1090,7 +1091,7 @@
                             .eq('event_date', dateStr);
 
                         if (existingRecords && existingRecords.length > 0) {
-                            const res = await supabase
+                            await supabase
                                 .from('praise_history')
                                 .update({
                                     slots_data: cleanedSlots,
@@ -1098,9 +1099,8 @@
                                 })
                                 .eq('channel_id', channelId)
                                 .eq('event_date', dateStr);
-                            error = res.error;
                         } else {
-                            const res = await supabase
+                            await supabase
                                 .from('praise_history')
                                 .insert({
                                     channel_id: channelId,
@@ -1108,16 +1108,16 @@
                                     slots_data: cleanedSlots,
                                     updated_at: new Date().toISOString()
                                 });
-                            error = res.error;
                         }
                     }
 
+                    if (!silent) showToast(`☁️ ${dateStr} 선곡이 클라우드 서버에 안전하게 저장되었습니다!`);
                     sendMqttSignal('UPDATE_DB_HISTORY');
                 } catch (err) {
                     console.warn("History DB 저장 예외 보완:", err);
-                    showToast(`💾 ${dateStr} 선곡 목록이 로컬 저장소 및 서버 안전 백업에 보존되었습니다!`);
+                    if (!silent) showToast(`💾 ${dateStr} 선곡 목록이 로컬 저장소 및 서버 안전 백업에 보존되었습니다!`);
                 } finally {
-                    setIsSyncing(false);
+                    if (!silent) setIsSyncing(false);
                 }
             };
 
@@ -1240,12 +1240,16 @@
                             saveSlotsToDB(slots);
                             // 찬양 제작소 보관함 인터넷 서버 자동 저장
                             uploadToDB(library, true);
+                            // 지정 날짜별 예배 선곡 목록 인터넷 서버 자동 저장
+                            if (selectedDate && slots.some(Boolean)) {
+                                saveHistoryToDB(selectedDate, slots, true);
+                            }
                         }, 800);
 
                         return () => clearTimeout(timer);
                     }
                 }
-            }, [library, slots, mode, dbSyncEnabled]);
+            }, [library, slots, selectedDate, mode, dbSyncEnabled]);
 
             // 최초 기기 접속 시 데이터 자동 동기화
             useEffect(() => {
@@ -1271,12 +1275,12 @@
                 initSync();
             }, [channelId, dbSyncEnabled]);
 
-            // 날짜 지정 변경 시 동일 날짜에 기저장된 선곡 목록이 있으면 자동으로 큐시트에 로드
+            // 접속 시 및 날짜 변경 시 해당 날짜의 선곡 목록을 서버 히스토리에서 자동으로 큐시트에 로드
             useEffect(() => {
                 if (!selectedDate || !Array.isArray(historyList) || historyList.length === 0) return;
                 
                 const matched = historyList.find(h => h.date === selectedDate);
-                if (matched && Array.isArray(matched.slots)) {
+                if (matched && Array.isArray(matched.slots) && matched.slots.some(Boolean)) {
                     const currentCleaned = slots.map(slot => {
                         if (!slot) return null;
                         return {
@@ -1291,16 +1295,11 @@
                     const isAlreadyLoaded = JSON.stringify(currentCleaned) === JSON.stringify(matched.slots);
                     
                     if (!isAlreadyLoaded) {
-                        const isCurrentEmpty = slots.every(s => !s);
-                        if (isCurrentEmpty) {
-                            loadHistoryToSlots(matched);
-                            showToast(`📅 ${selectedDate} 선곡 기록을 자동으로 불러왔습니다.`);
-                        } else {
-                            if (confirm(`📅 ${selectedDate}에 저장된 선곡 기록이 존재합니다.\n현재 큐시트의 곡들을 덮어쓰고 불러올까요?`)) {
-                                loadHistoryToSlots(matched);
-                                showToast(`📅 ${selectedDate} 선곡 기록을 불러왔습니다.`);
-                            }
+                        setSlots(matched.slots);
+                        if (supabase && dbSyncEnabled) {
+                            saveSlotsToDB(matched.slots);
                         }
+                        showToast(`☁️ 인터넷 서버에서 ${selectedDate} 예배 선곡 목록을 자동으로 불러왔습니다!`);
                     }
                 }
             }, [selectedDate, historyList]);
