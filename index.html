@@ -270,6 +270,28 @@
                 showToast(`🖥️ 확장 모니터 #${targetMonitor.id}번(${targetMonitor.label})으로 송출창을 열었습니다!`);
             };
 
+            // 자막 글씨 위치 제어 상태 ('center': 화면 중앙, 'top20': 윗쪽 20% 위치)
+            const [textPos, setTextPos] = useState(() => localStorage.getItem('praise_flow_text_pos') || 'center');
+
+            const handleSetTextPos = (pos) => {
+                setTextPos(pos);
+                localStorage.setItem('praise_flow_text_pos', pos);
+
+                if (bc) {
+                    bc.postMessage({ type: 'UPDATE_TEXT_POS', payload: pos });
+                }
+
+                if (presenterWindow && !presenterWindow.closed) {
+                    try {
+                        if (presenterWindow.updateTextPosDirect) {
+                            presenterWindow.updateTextPosDirect(pos);
+                        }
+                    } catch(e) {}
+                }
+
+                showToast(`📍 자막 위치를 [${pos === 'center' ? '화면 중앙' : '윗쪽 20% 위치'}]로 변경했습니다.`);
+            };
+
             // 최신 상태를 리스너 클로저 문제 없이 즉시 조회하기 위한 useRef 보관 (로컬 file:// 통신 및 팝업 연동용)
             const liveSlideRef = React.useRef(null);
             const activePointerRef = React.useRef({ slotIdx: -1, blockIdx: -1 });
@@ -1238,6 +1260,9 @@
                     window.updatePointerDirect = (pointer) => {
                         setActivePointer(pointer);
                     };
+                    window.updateTextPosDirect = (pos) => {
+                        setTextPos(pos);
+                    };
                     window.toggleFullscreenDirect = () => {
                         if (!document.fullscreenElement) {
                             if (document.documentElement.requestFullscreen) {
@@ -1311,6 +1336,7 @@
                 bc.onmessage = (e) => {
                     if (e.data.type === 'UPDATE_SLIDE') setLiveSlide(e.data.payload);
                     if (e.data.type === 'UPDATE_POINTER') setActivePointer(e.data.payload);
+                    if (e.data.type === 'UPDATE_TEXT_POS') setTextPos(e.data.payload);
                     if (e.data.type === 'TOGGLE_FULLSCREEN' && mode === 'presenter') {
                         if (window.toggleFullscreenDirect) window.toggleFullscreenDirect();
                     }
@@ -1319,6 +1345,7 @@
                     if (e.data.type === 'REQUEST_ACTIVE_SLIDE' && mode === 'controller') {
                         bc.postMessage({ type: 'UPDATE_SLIDE', payload: liveSlideRef.current });
                         bc.postMessage({ type: 'UPDATE_POINTER', payload: activePointerRef.current });
+                        bc.postMessage({ type: 'UPDATE_TEXT_POS', payload: textPos });
                     }
                 };
 
@@ -1616,7 +1643,7 @@
                         )}
                         <div className="p-bg" style={{backgroundImage:`url(${renderedSlide.themeUrl})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center', transition: '1s cubic-bezier(0.4, 0, 0.2, 1)' }}></div>
                         <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
-                        <div className="p-content" style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '5vw' }}>
+                        <div className="p-content" style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: textPos === 'top20' ? 'flex-start' : 'center', justifyContent: 'center', padding: '5vw', paddingTop: textPos === 'top20' ? '20vh' : '5vw', transition: 'all 0.3s ease' }}>
                             {renderedSlide.isTitle ? (
                                 <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '10vh', fontWeight: 900, color: 'white', textShadow: '4px 4px 25px black', textAlign: 'center', margin: 0 }}>
                                     {renderedSlide.title || renderedSlide.text}
@@ -1674,7 +1701,7 @@
                                         <div className="p-bg" style={{ backgroundImage: `url(${renderedSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
                                         <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
                                         
-                                        <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '1rem', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
+                                        <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '1rem', paddingTop: textPos === 'top20' ? '18cqw' : '1rem', textAlign: 'center', display: 'flex', alignItems: textPos === 'top20' ? 'flex-start' : 'center', justifyContent: 'center', width: '100%', height: '100%', transition: 'all 0.3s ease' }}>
                                             {renderedSlide.isTitle ? (
                                                 <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '7cqw', color: 'white', textShadow: '2px 2px 10px black', margin: 0 }}>{renderedSlide.title || renderedSlide.text}</h1>
                                             ) : (
@@ -1824,7 +1851,7 @@
                                         <div className="p-bg" style={{ backgroundImage: `url(${renderedSlide.themeUrl || DEFAULT_THEMES[0].url})`, position: 'absolute', inset: 0, backgroundSize: 'cover', backgroundPosition: 'center' }}></div>
                                         <div className="p-dim" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }}></div>
                                         
-                                        <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '2rem', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
+                                        <div className="p-content" style={{ position: 'relative', zIndex: 5, padding: '2rem', paddingTop: textPos === 'top20' ? '18cqw' : '2rem', textAlign: 'center', display: 'flex', alignItems: textPos === 'top20' ? 'flex-start' : 'center', justifyContent: 'center', width: '100%', height: '100%', transition: 'all 0.3s ease' }}>
                                             {renderedSlide.isTitle ? (
                                                 <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{ fontSize: '5.5cqw', color: 'white', textShadow: '2px 2px 15px black', margin: 0 }}>{renderedSlide.title || renderedSlide.text}</h1>
                                             ) : (
@@ -2112,7 +2139,7 @@
                                     <div className="p-bg" style={{backgroundImage:`url(${renderedSlide.themeUrl || DEFAULT_THEMES[0].url})`, position:'absolute', inset:0, backgroundSize:'cover', backgroundPosition:'center'}}></div>
                                     <div className="p-dim" style={{position:'absolute', inset:0, background:'rgba(0,0,0,0.5)'}}></div>
                                     
-                                    <div className="p-content" style={{position:'relative', zIndex:5, padding:'1rem', textAlign:'center', display:'flex', alignItems:'center', justifyContent:'center', width:'100%', height:'100%'}}>
+                                    <div className="p-content" style={{position:'relative', zIndex:5, padding:'1rem', paddingTop: textPos === 'top20' ? '18cqw' : '1rem', textAlign:'center', display:'flex', alignItems: textPos === 'top20' ? 'flex-start' : 'center', justifyContent:'center', width:'100%', height:'100%', transition: 'all 0.3s ease'}}>
                                         {renderedSlide.isTitle ? (
                                             <h1 className={`p-title ${isFadingOut ? 'fade-out' : 'fade-in'}`} style={{fontSize:'5.5cqw', color:'white', textShadow:'2px 2px 10px black', margin:0, wordBreak:'break-all'}}>{renderedSlide.title || renderedSlide.text}</h1>
                                         ) : (
@@ -2120,6 +2147,47 @@
                                                 {renderedSlide.text || '순서 큐시트에서 가사를 클릭해 주세요.'}
                                             </div>
                                         )}
+                                    </div>
+                                </div>
+
+                                {/* 자막 글씨 위치 선택 컨트롤 바 (중앙 vs 윗쪽 20%) */}
+                                <div style={{display:'flex', alignItems:'center', background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', padding:'10px 14px', borderRadius:'16px', justifyContent:'space-between', flexWrap:'wrap', gap:'8px'}}>
+                                    <span style={{fontSize:'0.8rem', fontWeight:800, color:'var(--primary)', display:'flex', alignItems:'center', gap:'6px'}}>
+                                        <i data-lucide="align-vertical-space-around"></i> 📍 가사 글씨 위치:
+                                    </span>
+                                    <div style={{display:'flex', gap:'8px'}}>
+                                        <button
+                                            className="btn"
+                                            onClick={() => handleSetTextPos('center')}
+                                            style={{
+                                                padding:'6px 14px',
+                                                fontSize:'0.75rem',
+                                                fontWeight:800,
+                                                background: textPos === 'center' ? 'linear-gradient(135deg, #4f46e5, #7c3aed)' : 'rgba(255,255,255,0.05)',
+                                                color: textPos === 'center' ? 'white' : 'var(--text-dim)',
+                                                border: textPos === 'center' ? '1px solid #a78bfa' : '1px solid var(--border)',
+                                                borderRadius:'10px',
+                                                cursor:'pointer'
+                                            }}
+                                        >
+                                            🎯 화면 중앙
+                                        </button>
+                                        <button
+                                            className="btn"
+                                            onClick={() => handleSetTextPos('top20')}
+                                            style={{
+                                                padding:'6px 14px',
+                                                fontSize:'0.75rem',
+                                                fontWeight:800,
+                                                background: textPos === 'top20' ? 'linear-gradient(135deg, #4f46e5, #7c3aed)' : 'rgba(255,255,255,0.05)',
+                                                color: textPos === 'top20' ? 'white' : 'var(--text-dim)',
+                                                border: textPos === 'top20' ? '1px solid #a78bfa' : '1px solid var(--border)',
+                                                borderRadius:'10px',
+                                                cursor:'pointer'
+                                            }}
+                                        >
+                                            ⬆️ 윗쪽 20% 위치
+                                        </button>
                                     </div>
                                 </div>
 
