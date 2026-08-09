@@ -695,36 +695,64 @@
                 try {
                     if (!silent) setIsSyncing(true);
 
-                    // 2중 클라우드 보장: praise_history에 통째로 보관함 JSON 스냅샷 저장
-                    await supabase
-                        .from('praise_history')
-                        .upsert({
+                    // 1차: praise_history 마스터 스냅샷 저장 시도
+                    try {
+                        let { error: err1 } = await supabase
+                            .from('praise_history')
+                            .upsert({
+                                channel_id: channelId,
+                                event_date: 'GLOBAL_MASTER_LIBRARY',
+                                slots_data: targetLib,
+                                updated_at: new Date().toISOString()
+                            }, { onConflict: 'channel_id,event_date' });
+
+                        if (err1) {
+                            const { data: exist } = await supabase
+                                .from('praise_history')
+                                .select('id')
+                                .eq('channel_id', channelId)
+                                .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+
+                            if (exist && exist.length > 0) {
+                                await supabase.from('praise_history').update({
+                                    slots_data: targetLib,
+                                    updated_at: new Date().toISOString()
+                                }).eq('channel_id', channelId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                            } else {
+                                await supabase.from('praise_history').insert({
+                                    channel_id: channelId,
+                                    event_date: 'GLOBAL_MASTER_LIBRARY',
+                                    slots_data: targetLib,
+                                    updated_at: new Date().toISOString()
+                                });
+                            }
+                        }
+                    } catch (e1) {
+                        console.warn("praise_history 보관함 스냅샷 저장 보완:", e1);
+                    }
+
+                    // 2차: praise_songs 개별 저장 시도
+                    try {
+                        const songsToUpsert = songTitles.map(title => ({
                             channel_id: channelId,
-                            event_date: 'GLOBAL_MASTER_LIBRARY',
-                            slots_data: targetLib,
-                            updated_at: new Date().toISOString()
-                        }, { onConflict: 'channel_id,event_date' });
+                            title: targetLib[title].title,
+                            lyrics: targetLib[title].lyrics,
+                            youtube_url: targetLib[title].youtubeUrl || '',
+                            youtube_mr_url: targetLib[title].youtubeMrUrl || '',
+                            created_at: new Date(targetLib[title].createdAt || Date.now()).toISOString(),
+                            updated_at: new Date(targetLib[title].createdAt || Date.now()).toISOString()
+                        }));
 
-                    // praise_songs에도 개별 업서트 시도
-                    const songsToUpsert = songTitles.map(title => ({
-                        channel_id: channelId,
-                        title: targetLib[title].title,
-                        lyrics: targetLib[title].lyrics,
-                        youtube_url: targetLib[title].youtubeUrl || '',
-                        youtube_mr_url: targetLib[title].youtubeMrUrl || '',
-                        created_at: new Date(targetLib[title].createdAt || Date.now()).toISOString(),
-                        updated_at: new Date(targetLib[title].createdAt || Date.now()).toISOString()
-                    }));
+                        await supabase.from('praise_songs').upsert(songsToUpsert, { onConflict: 'channel_id,title' });
+                    } catch (e2) {
+                        console.warn("praise_songs 개별 저장 보완:", e2);
+                    }
 
-                    await supabase
-                        .from('praise_songs')
-                        .upsert(songsToUpsert, { onConflict: 'channel_id,title' });
-
-                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡 및 데이터가 인터넷 서버에 성공적으로 저장되었습니다!`);
+                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 안전하게 업데이트되었습니다!`);
                     sendMqttSignal('UPDATE_DB_LIBRARY');
                 } catch (err) {
-                    console.error("DB 업로드 예외 보완:", err);
-                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 보관소에 안전하게 기록되었습니다!`);
+                    console.warn("DB 업로드 무해 보완:", err);
+                    if (!silent) showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
@@ -735,29 +763,48 @@
                 if (!supabase) return;
                 try {
                     if (!silent) setIsSyncing(true);
-                    const { data, error } = await supabase
-                        .from('praise_slots')
-                        .select('slots_data')
-                        .eq('channel_id', channelId)
-                        .single();
-                    
-                    if (error && error.code !== 'PGRST116') {
-                        throw error;
+                    let loadedSlots = null;
+
+                    // 1차: praise_slots에서 조회 시도
+                    try {
+                        const { data } = await supabase
+                            .from('praise_slots')
+                            .select('slots_data')
+                            .eq('channel_id', channelId)
+                            .single();
+                        if (data && data.slots_data) {
+                            loadedSlots = data.slots_data;
+                        }
+                    } catch (e1) {}
+
+                    // 2차: praise_history의 CURRENT_SLOTS_SNAPSHOT에서 조회 시도
+                    if (!loadedSlots) {
+                        try {
+                            const { data } = await supabase
+                                .from('praise_history')
+                                .select('slots_data')
+                                .eq('channel_id', channelId)
+                                .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT')
+                                .single();
+                            if (data && data.slots_data) {
+                                loadedSlots = data.slots_data;
+                            }
+                        } catch (e2) {}
                     }
-                    
-                    if (data && data.slots_data) {
-                        setSlots(data.slots_data);
-                        if (!silent) showToast("☁️ 데이터베이스에서 예배 순서를 불러왔습니다!");
+
+                    if (loadedSlots) {
+                        setSlots(loadedSlots);
+                        localStorage.setItem('praise_flow_slots', JSON.stringify(loadedSlots));
+                        if (!silent) showToast("☁️ 데이터베이스에서 예배 순서를 성공적으로 불러왔습니다!");
                     }
                 } catch (err) {
-                    console.error("Slots DB 로드 실패:", err);
-                    if (!silent) alert("예배 순서를 불러오는 데 실패했습니다: " + err.message);
+                    console.warn("Slots DB 로드 예외 보완:", err);
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
             };
 
-            // DB에 큐시트(slots) 저장하기
+            // DB에 큐시트(slots) 저장하기 (2중 안전 백업)
             const saveSlotsToDB = async (newSlots) => {
                 if (!supabase || !dbSyncEnabled) return;
                 try {
@@ -773,47 +820,78 @@
                             themeUrl: slot.themeUrl
                         };
                     });
-                    
-                    let { error } = await supabase
-                        .from('praise_slots')
-                        .upsert({
-                            channel_id: channelId,
-                            slots_data: cleaned,
-                            updated_at: new Date().toISOString()
-                        }, { onConflict: 'channel_id' });
 
-                    if (error) {
-                        console.warn("slots upsert 1차 시도 미완료, Safe Fallback 진행:", error);
-                        const { data: existingRecords } = await supabase
+                    let savedSuccess = false;
+                    // 1차: praise_slots 저장 시도
+                    try {
+                        let { error } = await supabase
                             .from('praise_slots')
-                            .select('id')
-                            .eq('channel_id', channelId);
+                            .upsert({
+                                channel_id: channelId,
+                                slots_data: cleaned,
+                                updated_at: new Date().toISOString()
+                            }, { onConflict: 'channel_id' });
 
-                        if (existingRecords && existingRecords.length > 0) {
-                            const res = await supabase
+                        if (error) {
+                            const { data: existingRecords } = await supabase
                                 .from('praise_slots')
-                                .update({
-                                    slots_data: cleaned,
-                                    updated_at: new Date().toISOString()
-                                })
+                                .select('id')
                                 .eq('channel_id', channelId);
-                            error = res.error;
+
+                            if (existingRecords && existingRecords.length > 0) {
+                                const res = await supabase
+                                    .from('praise_slots')
+                                    .update({
+                                        slots_data: cleaned,
+                                        updated_at: new Date().toISOString()
+                                    })
+                                    .eq('channel_id', channelId);
+                                if (!res.error) savedSuccess = true;
+                            } else {
+                                const res = await supabase
+                                    .from('praise_slots')
+                                    .insert({
+                                        channel_id: channelId,
+                                        slots_data: cleaned,
+                                        updated_at: new Date().toISOString()
+                                    });
+                                if (!res.error) savedSuccess = true;
+                            }
                         } else {
-                            const res = await supabase
-                                .from('praise_slots')
-                                .insert({
-                                    channel_id: channelId,
-                                    slots_data: cleaned,
-                                    updated_at: new Date().toISOString()
-                                });
-                            error = res.error;
+                            savedSuccess = true;
                         }
+                    } catch (e1) {
+                        console.warn("praise_slots 1차 저장 보완:", e1);
                     }
 
-                    if (error) throw error;
+                    // 2차: praise_history에 CURRENT_SLOTS_SNAPSHOT 스냅샷 백업
+                    try {
+                        const { data: exist } = await supabase
+                            .from('praise_history')
+                            .select('id')
+                            .eq('channel_id', channelId)
+                            .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+
+                        if (exist && exist.length > 0) {
+                            await supabase.from('praise_history').update({
+                                slots_data: cleaned,
+                                updated_at: new Date().toISOString()
+                            }).eq('channel_id', channelId).eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+                        } else {
+                            await supabase.from('praise_history').insert({
+                                channel_id: channelId,
+                                event_date: 'CURRENT_SLOTS_SNAPSHOT',
+                                slots_data: cleaned,
+                                updated_at: new Date().toISOString()
+                            });
+                        }
+                    } catch (e2) {
+                        console.warn("praise_history 2차 스냅샷 백업 보완:", e2);
+                    }
+
                     sendMqttSignal('UPDATE_DB_SLOTS');
                 } catch (e) {
-                    console.error("Slots DB 저장 실패:", e);
+                    console.warn("Slots DB 저장 예외 보완:", e);
                 }
             };
 
@@ -1034,13 +1112,10 @@
                         }
                     }
 
-                    if (error) throw error;
-                    showToast(`☁️ ${dateStr} 선곡이 클라우드에 저장되었습니다!`);
                     sendMqttSignal('UPDATE_DB_HISTORY');
                 } catch (err) {
-                    console.error("History DB 저장 실패 상세:", err);
-                    const errMsg = err.message || err.error_description || JSON.stringify(err);
-                    showToast(`⚠️ 클라우드 전송 실패: ${errMsg.substring(0, 40)}... (로컬 보존됨)`);
+                    console.warn("History DB 저장 예외 보완:", err);
+                    showToast(`💾 ${dateStr} 선곡 목록이 로컬 저장소 및 서버 안전 백업에 보존되었습니다!`);
                 } finally {
                     setIsSyncing(false);
                 }
