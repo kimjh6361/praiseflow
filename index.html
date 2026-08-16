@@ -6,7 +6,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.4.1</title>
+    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.4.2</title>
     <!-- 라이브러리 로드 (오프라인 구동을 위해 로컬 파일로 내장) -->
     <script src="lib/react.production.min.js"></script>
     <script src="lib/react-dom.production.min.js"></script>
@@ -1975,7 +1975,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.4.1</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.4.2</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -2328,12 +2328,12 @@
                     ) : (
                         <div className="card" style={{background:'var(--card-bg)', border:'1px solid var(--border)', padding:'2rem', borderRadius:'24px'}}>
                             <div style={{display:'flex', gap:10, marginBottom:30, flexWrap:'wrap'}}>
-                                <button className="btn btn-primary" style={{flex:1, minWidth:'140px', background:'var(--primary)', color:'white', fontWeight:800}} onClick={()=>{
+                                <button className="btn btn-primary" style={{flex:1, minWidth:'160px', background:'var(--primary)', color:'white', fontWeight:800}} onClick={()=>{
                                     uploadToDB();
-                                }}>☁️ 클라우드 DB 전체 저장</button>
-                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800}} onClick={()=>{
+                                }}>☁️ 전체 찬양 DB 수동 저장 ({Object.keys(library).length}곡)</button>
+                                <button className="btn btn-outline" style={{flex:1, minWidth:'150px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800}} onClick={()=>{
                                     fetchFromDB(false);
-                                }}>☁️ 클라우드 DB 불러오기</button>
+                                }}>☁️ 클라우드 DB 수동 불러오기</button>
                                 <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'#a78bfa', background:'rgba(167,139,250,0.1)', border:'1px solid rgba(167,139,250,0.3)', fontWeight:800}} onClick={inspectServerData}>
                                     🔍 서버 백업 미리보기
                                 </button>
@@ -2454,15 +2454,23 @@
                                 </div>
                             </div>
                             <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:'10px'}}>
-                                {getSortedAndFilteredList(searchTerm).map(t => (
-                                    <div key={t} className="slot-card" style={{padding:'10px 14px', borderStyle:'solid', minHeight:'60px', cursor:'pointer', position:'relative', display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'flex-start', background: 'rgba(255, 255, 255, 0.02)', borderColor: 'var(--border)'}} onClick={()=>{
-                                        document.getElementById('new-title').value = library[t].title;
-                                        document.getElementById('new-lyrics').value = library[t].lyrics;
-                                        document.getElementById('new-youtube-music').value = library[t].youtubeUrl || '';
-                                        document.getElementById('new-youtube-mr').value = library[t].youtubeMrUrl || '';
-                                        window.scrollTo({ top: 300, behavior: 'smooth' });
-                                    }}>
-                                        <div style={{fontWeight:900, fontSize:'0.9rem', color:'white', width:'75%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t}</div>
+                                {getSortedAndFilteredList(searchTerm).map(t => {
+                                    const songItem = library[t];
+                                    const songTime = songItem ? (songItem.updatedAt || songItem.createdAt || null) : null;
+                                    return (
+                                        <div key={t} className="slot-card" style={{padding:'10px 14px', borderStyle:'solid', minHeight:'65px', cursor:'pointer', position:'relative', display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'flex-start', background: 'rgba(255, 255, 255, 0.02)', borderColor: 'var(--border)'}} onClick={()=>{
+                                            document.getElementById('new-title').value = library[t].title;
+                                            document.getElementById('new-lyrics').value = library[t].lyrics;
+                                            document.getElementById('new-youtube-music').value = library[t].youtubeUrl || '';
+                                            document.getElementById('new-youtube-mr').value = library[t].youtubeMrUrl || '';
+                                            window.scrollTo({ top: 300, behavior: 'smooth' });
+                                        }}>
+                                            <div style={{fontWeight:900, fontSize:'0.9rem', color:'white', width:'75%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{t}</div>
+                                            {songTime && (
+                                                <div style={{fontSize:'0.68rem', color:'var(--text-dim)', marginTop:3, fontWeight:600}}>
+                                                    🕒 저장일시: {getFormattedDateTime(songTime)}
+                                                </div>
+                                            )}
                                         {(library[t].youtubeUrl || library[t].youtubeMrUrl) && (
                                             <div style={{display:'flex', gap:6, marginTop:8, zIndex:12, position:'relative'}}>
                                                 {library[t].youtubeUrl && (
@@ -2562,7 +2570,8 @@
                                             )}
                                         </button>
                                     </div>
-                                ))}
+                                );
+                            })}
                             </div>
                         </div>
                     )}
@@ -3196,7 +3205,7 @@
 
                     <footer style={{marginTop:'40px', paddingTop:'20px', borderTop:'1px solid var(--border)', display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:'0.75rem', color:'var(--text-dim)', flexWrap:'wrap', gap:10}}>
                         <span>PraiseFlow PRO Smart Worship PPT System &nbsp;|&nbsp; Created by <strong style={{color:'var(--primary)'}}>kim jung hyun</strong></span>
-                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.4.1</span>
+                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.4.2</span>
                     </footer>
 
                     {showYoutubePlayer && activeYoutubeId && (
