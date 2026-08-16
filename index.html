@@ -6,7 +6,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.4.0</title>
+    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.4.1</title>
     <!-- 라이브러리 로드 (오프라인 구동을 위해 로컬 파일로 내장) -->
     <script src="lib/react.production.min.js"></script>
     <script src="lib/react-dom.production.min.js"></script>
@@ -988,7 +988,7 @@
                 e.target.value = '';
             };
 
-            // DB에 특정 날짜의 선곡 히스토리 저장 (고성능 REST 클라우드 DB + real-time P2P 동시 기록)
+            // DB에 특정 날짜의 선곡 히스토리 저장 (전체 아카이브 보존 포함)
             const saveHistoryToDB = async (dateStr, slotsToSave, silent = false) => {
                 if (!dateStr || dateStr === 'GLOBAL_MASTER_LIBRARY' || dateStr === 'GLOBAL_MASTER_HISTORY' || dateStr === 'CURRENT_SLOTS_SNAPSHOT') {
                     if (!silent) alert("유효한 날짜를 지정해 주세요.");
@@ -1014,25 +1014,36 @@
                         .filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT');
                 } catch (e) {}
 
-                const existingIdx = localHistory.findIndex(h => h.date === dateStr);
+                const mergedMap = {};
+                (Array.isArray(historyList) ? historyList : []).forEach(h => {
+                    if (h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT') {
+                        mergedMap[h.date] = h;
+                    }
+                });
+                localHistory.forEach(h => {
+                    if (h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT') {
+                        if (!mergedMap[h.date] || (h.updatedAt || 0) >= (mergedMap[h.date].updatedAt || 0)) {
+                            mergedMap[h.date] = h;
+                        }
+                    }
+                });
+
                 const nowTime = Date.now();
-                if (existingIdx === -1) {
-                    localHistory.push({ date: dateStr, slots: cleanedSlots, updatedAt: nowTime });
-                } else {
-                    localHistory[existingIdx] = { date: dateStr, slots: cleanedSlots, updatedAt: nowTime };
-                }
-                localHistory.sort((a, b) => b.date.localeCompare(a.date));
-                setHistoryList(localHistory);
-                localStorage.setItem('praise_flow_history', JSON.stringify(localHistory));
+                mergedMap[dateStr] = { date: dateStr, slots: cleanedSlots, updatedAt: nowTime };
+
+                const fullList = Object.values(mergedMap).sort((a, b) => b.date.localeCompare(a.date));
+
+                setHistoryList(fullList);
+                localStorage.setItem('praise_flow_history', JSON.stringify(fullList));
 
                 try {
                     if (!silent) setIsSyncing(true);
 
-                    // 1. 고성능 REST 클라우드 DB에 실시간 저장
-                    await saveCloudData(CLOUD_HISTORY_URL, 'praiseflow_history_master', 'history', localHistory);
+                    // 1. 고성능 REST 클라우드 DB에 전체 아카이브 실시간 저장
+                    await saveCloudData(CLOUD_HISTORY_URL, 'praiseflow_history_master', 'history', fullList);
 
                     // 2. MQTT 실시간 P2P 전체 기기 방송
-                    sendMqttSignal('SYNC_FULL_HISTORY_PAYLOAD', localHistory);
+                    sendMqttSignal('SYNC_FULL_HISTORY_PAYLOAD', fullList);
 
                     // 3. Supabase 보완 시도
                     if (supabase) {
@@ -1047,14 +1058,14 @@
 
                                 if (existHist && existHist.length > 0) {
                                     await supabase.from('praise_history').update({
-                                        slots_data: localHistory,
+                                        slots_data: fullList,
                                         updated_at: new Date().toISOString()
                                     }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_HISTORY');
                                 } else {
                                     await supabase.from('praise_history').insert({
                                         channel_id: chId,
                                         event_date: 'GLOBAL_MASTER_HISTORY',
-                                        slots_data: localHistory,
+                                        slots_data: fullList,
                                         updated_at: new Date().toISOString()
                                     });
                                 }
@@ -1066,10 +1077,92 @@
                     setLastHistorySaveTime(saveTimeStr);
                     localStorage.setItem('praise_last_history_save_time', saveTimeStr);
 
-                    if (!silent) showToast(`☁️ ${dateStr} 선곡 기록이 인터넷 클라우드 서버에 저장되었습니다! (저장일시: ${saveTimeStr})`);
+                    if (!silent) showToast(`☁️ 전체 ${fullList.length}개 날짜 선곡 기록이 클라우드 서버에 안전하게 저장되었습니다! (${saveTimeStr})`);
                 } catch (err) {
                     console.warn("History DB 저장 예외 보완:", err);
-                    if (!silent) showToast(`💾 ${dateStr} 선곡 목록이 로컬 및 클라우드 백업에 보존되었습니다!`);
+                    if (!silent) showToast(`💾 로컬 백업에 ${dateStr} 포함 ${fullList.length}개 날짜 목록이 보존되었습니다.`);
+                } finally {
+                    if (!silent) setIsSyncing(false);
+                }
+            };
+
+            // DB에 아카이브 내 전체 날짜 선곡 히스토리 한꺼번에 수동 저장하기
+            const uploadFullHistoryToDB = async (silent = false) => {
+                let localHistory = [];
+                try {
+                    localHistory = JSON.parse(localStorage.getItem('praise_flow_history') || '[]')
+                        .filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT');
+                } catch(e) {}
+
+                const mergedMap = {};
+                (Array.isArray(historyList) ? historyList : []).forEach(h => {
+                    if (h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT') {
+                        mergedMap[h.date] = h;
+                    }
+                });
+                localHistory.forEach(h => {
+                    if (h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT') {
+                        if (!mergedMap[h.date] || (h.updatedAt || 0) >= (mergedMap[h.date].updatedAt || 0)) {
+                            mergedMap[h.date] = h;
+                        }
+                    }
+                });
+
+                const fullList = Object.values(mergedMap).sort((a, b) => b.date.localeCompare(a.date));
+
+                if (fullList.length === 0) {
+                    if (!silent) alert("저장할 아카이브 히스토리가 없습니다.");
+                    return;
+                }
+
+                setHistoryList(fullList);
+                localStorage.setItem('praise_flow_history', JSON.stringify(fullList));
+
+                try {
+                    if (!silent) setIsSyncing(true);
+
+                    // 1. 고성능 REST 클라우드 DB에 전체 아카이브 실시간 저장
+                    await saveCloudData(CLOUD_HISTORY_URL, 'praiseflow_history_master', 'history', fullList);
+
+                    // 2. MQTT 실시간 P2P 전체 기기 방송
+                    sendMqttSignal('SYNC_FULL_HISTORY_PAYLOAD', fullList);
+
+                    // 3. Supabase 보완 시도
+                    if (supabase) {
+                        const targetChannels = Array.from(new Set([channelId, 'praise_main_channel', 'default']));
+                        for (const chId of targetChannels) {
+                            try {
+                                const { data: existHist } = await supabase
+                                    .from('praise_history')
+                                    .select('id')
+                                    .eq('channel_id', chId)
+                                    .eq('event_date', 'GLOBAL_MASTER_HISTORY');
+
+                                if (existHist && existHist.length > 0) {
+                                    await supabase.from('praise_history').update({
+                                        slots_data: fullList,
+                                        updated_at: new Date().toISOString()
+                                    }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_HISTORY');
+                                } else {
+                                    await supabase.from('praise_history').insert({
+                                        channel_id: chId,
+                                        event_date: 'GLOBAL_MASTER_HISTORY',
+                                        slots_data: fullList,
+                                        updated_at: new Date().toISOString()
+                                    });
+                                }
+                            } catch (snapErr) {}
+                        }
+                    }
+
+                    const saveTimeStr = getFormattedDateTime();
+                    setLastHistorySaveTime(saveTimeStr);
+                    localStorage.setItem('praise_last_history_save_time', saveTimeStr);
+
+                    if (!silent) showToast(`☁️ 아카이브의 전체 ${fullList.length}개 날짜 선곡 기록이 클라우드 서버에 안전하게 저장되었습니다! (${saveTimeStr})`);
+                } catch (err) {
+                    console.warn("전체 History DB 저장 예외 보완:", err);
+                    if (!silent) showToast(`💾 로컬 백업에 총 ${fullList.length}개 날짜 선곡 기록이 보존되었습니다.`);
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
@@ -1882,7 +1975,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.4.0</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.4.1</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -2671,9 +2764,16 @@
                                     <button 
                                         className="btn btn-primary" 
                                         onClick={() => fetchHistoryFromDB(false)}
-                                        style={{flex:1, minWidth:'160px', padding:'8px 12px', fontSize:'0.8rem', background:'var(--primary)', color:'white', fontWeight:800, borderRadius:8}}
+                                        style={{flex:1, minWidth:'150px', padding:'8px 12px', fontSize:'0.8rem', background:'var(--primary)', color:'white', fontWeight:800, borderRadius:8}}
                                     >
                                         ☁️ DB 아카이브 수동 불러오기
+                                    </button>
+                                    <button 
+                                        className="btn btn-primary" 
+                                        onClick={() => uploadFullHistoryToDB(false)}
+                                        style={{flex:1, minWidth:'150px', padding:'8px 12px', fontSize:'0.8rem', background:'rgba(167, 139, 250, 0.2)', border:'1px solid #a78bfa', color:'white', fontWeight:800, borderRadius:8}}
+                                    >
+                                        ☁️ 전체 아카이브 DB 수동 저장 ({historyList.length}개 날짜)
                                     </button>
                                     <button 
                                         className="btn btn-outline" 
@@ -2684,9 +2784,9 @@
                                                 alert("현재 큐시트에 선곡된 찬양이 없거나 유효한 날짜가 지정되지 않았습니다.");
                                             }
                                         }}
-                                        style={{flex:1, minWidth:'160px', padding:'8px 12px', fontSize:'0.8rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800, borderRadius:8}}
+                                        style={{flex:1, minWidth:'150px', padding:'8px 12px', fontSize:'0.8rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800, borderRadius:8}}
                                     >
-                                        ☁️ 현재 선곡 DB 수동 저장 ({selectedDate})
+                                        ☁️ 선택 날짜 DB 수동 저장 ({selectedDate})
                                     </button>
                                     <button 
                                         className="btn btn-outline" 
@@ -3096,7 +3196,7 @@
 
                     <footer style={{marginTop:'40px', paddingTop:'20px', borderTop:'1px solid var(--border)', display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:'0.75rem', color:'var(--text-dim)', flexWrap:'wrap', gap:10}}>
                         <span>PraiseFlow PRO Smart Worship PPT System &nbsp;|&nbsp; Created by <strong style={{color:'var(--primary)'}}>kim jung hyun</strong></span>
-                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.4.0</span>
+                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.4.1</span>
                     </footer>
 
                     {showYoutubePlayer && activeYoutubeId && (
