@@ -6,7 +6,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.2</title>
+    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.4.0</title>
     <!-- 라이브러리 로드 (오프라인 구동을 위해 로컬 파일로 내장) -->
     <script src="lib/react.production.min.js"></script>
     <script src="lib/react-dom.production.min.js"></script>
@@ -564,9 +564,51 @@
                 const day = String(today.getDate()).padStart(2, '0');
                 return `${year}-${month}-${day}`;
             });
+            const getFormattedDateTime = (timestamp = Date.now()) => {
+                const d = new Date(timestamp);
+                const yyyy = d.getFullYear();
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mi = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+            };
+
+            const [lastDbSaveTime, setLastDbSaveTime] = useState(() => localStorage.getItem('praise_last_db_save_time') || '');
+            const [lastHistorySaveTime, setLastHistorySaveTime] = useState(() => localStorage.getItem('praise_last_history_save_time') || '');
+
             const [historyList, setHistoryList] = useState([]);
             const [showHistoryModal, setShowHistoryModal] = useState(false);
             const [historySearchQuery, setHistorySearchQuery] = useState('');
+
+            const [showServerInspectionModal, setShowServerInspectionModal] = useState(false);
+            const [serverInspectionData, setServerInspectionData] = useState(null);
+            const [isInspectingServer, setIsInspectingServer] = useState(false);
+            const [serverInspectionTab, setServerInspectionTab] = useState('library');
+
+            const inspectServerData = async () => {
+                setIsInspectingServer(true);
+                setShowServerInspectionModal(true);
+                try {
+                    const cloudLib = await fetchCloudData(CLOUD_LIBRARY_URL, 'library') || {};
+                    const cloudHist = await fetchCloudData(CLOUD_HISTORY_URL, 'history') || [];
+                    
+                    const cleanHist = Array.isArray(cloudHist) ? cloudHist.filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT') : [];
+                    cleanHist.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+                    setServerInspectionData({
+                        library: typeof cloudLib === 'object' ? cloudLib : {},
+                        history: cleanHist,
+                        inspectedAt: getFormattedDateTime()
+                    });
+                } catch (err) {
+                    console.error("서버 데이터 조회 실패:", err);
+                    showToast("⚠️ 서버 백업 데이터를 불러오는데 실패했습니다.");
+                } finally {
+                    setIsInspectingServer(false);
+                }
+            };
 
             const [activePointer, setActivePointerState] = useState({ slotIdx: -1, blockIdx: -1 });
             const [liveSlide, setLiveSlideState] = useState({ text: '', title: '', themeUrl: DEFAULT_THEMES[0].url, isTitle: false });
@@ -758,7 +800,11 @@
                     // 3. MQTT 연결된 전 기기에 실시간 P2P 전송
                     sendMqttSignal('SYNC_FULL_LIBRARY_PAYLOAD', targetLib);
 
-                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 안전하게 업데이트되었습니다!`);
+                    const saveTimeStr = getFormattedDateTime();
+                    setLastDbSaveTime(saveTimeStr);
+                    localStorage.setItem('praise_last_db_save_time', saveTimeStr);
+
+                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 업로드되었습니다! (저장일시: ${saveTimeStr})`);
                 } catch (err) {
                     console.warn("DB 업로드 보완:", err);
                     if (!silent) showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
@@ -1016,7 +1062,11 @@
                         }
                     }
 
-                    if (!silent) showToast(`☁️ ${dateStr} 선곡 기록이 인터넷 클라우드 서버에 성공적으로 저장되었습니다!`);
+                    const saveTimeStr = getFormattedDateTime();
+                    setLastHistorySaveTime(saveTimeStr);
+                    localStorage.setItem('praise_last_history_save_time', saveTimeStr);
+
+                    if (!silent) showToast(`☁️ ${dateStr} 선곡 기록이 인터넷 클라우드 서버에 저장되었습니다! (저장일시: ${saveTimeStr})`);
                 } catch (err) {
                     console.warn("History DB 저장 예외 보완:", err);
                     if (!silent) showToast(`💾 ${dateStr} 선곡 목록이 로컬 및 클라우드 백업에 보존되었습니다!`);
@@ -1124,32 +1174,16 @@
                 }
             };
 
-            // 뷰어 모드가 아닐 때 로컬 스토리지 및 인터넷 클라우드 서버(Supabase)에 데이터 자동 저장 (Auto-Save)
+            // 뷰어 모드가 아닐 때 브라우저 로컬 스토리지에만 안전 기록 (DB 자동 저장 비활성화, 수동 저장 방식 사용)
             useEffect(() => {
                 if (mode !== 'viewer') {
-                    // 1. 로컬 저장소 안전 기록
+                    // 로컬 저장소 안전 기록
                     localStorage.setItem('praise_flow_f_db', JSON.stringify(library));
                     localStorage.setItem('praise_flow_slots', JSON.stringify(slots));
-
-                    // 2. 인터넷 클라우드 서버 디바운스 자동 저장 (0.8초 후 배경 자동 동기화)
-                    if (supabase && dbSyncEnabled) {
-                        const timer = setTimeout(() => {
-                            // 예배 순서 큐시트 선곡 목록 인터넷 서버 자동 저장
-                            saveSlotsToDB(slots);
-                            // 찬양 제작소 보관함 인터넷 서버 자동 저장
-                            uploadToDB(library, true);
-                            // 지정 날짜별 예배 선곡 목록 인터넷 서버 자동 저장
-                            if (selectedDate && slots.some(Boolean)) {
-                                saveHistoryToDB(selectedDate, slots, true);
-                            }
-                        }, 800);
-
-                        return () => clearTimeout(timer);
-                    }
                 }
-            }, [library, slots, selectedDate, mode, dbSyncEnabled]);
+            }, [library, slots, mode]);
 
-            // 최초 기기 접속 시 데이터 자동 동기화
+            // 최초 기기 접속 시 로더 숨김 처리 (DB 자동 불러오기 비활성화, 수동 불러오기 방식 사용)
             useEffect(() => {
                 const urlParams = new URLSearchParams(window.location.search);
                 const hasChannelParam = urlParams.has('channel');
@@ -1160,42 +1194,10 @@
 
                 const initSync = async () => {
                     const loader = document.getElementById('loader');
-                    if (loader) loader.style.display = 'flex';
-                    
-                    if (dbSyncEnabled || hasChannelParam) {
-                        if (fetchFromDBRef.current) await fetchFromDBRef.current(true);
-                        if (fetchSlotsFromDBRef.current) await fetchSlotsFromDBRef.current(true);
-                    }
-                    if (fetchHistoryFromDBRef.current) await fetchHistoryFromDBRef.current(true);
-                    
                     if (loader) loader.style.display = 'none';
                 };
                 initSync();
             }, [channelId, dbSyncEnabled]);
-
-            // 접속 시 및 날짜 변경 시 해당 날짜의 선곡 목록을 서버 히스토리에서 자동으로 큐시트에 로드 (단 1회 로딩 보장 및 깜빡임 차단)
-            useEffect(() => {
-                if (!selectedDate || !Array.isArray(historyList) || historyList.length === 0) return;
-                
-                const matched = historyList.find(h => h.date === selectedDate);
-                if (matched && Array.isArray(matched.slots) && matched.slots.some(Boolean)) {
-                    const loadTag = selectedDate + '_' + (matched.updatedAt || 0) + '_' + matched.slots.filter(Boolean).length;
-                    if (lastAutoLoadedTagRef.current === loadTag) return;
-
-                    const isAlreadyLoaded = slots.every((s, idx) => {
-                        const m = matched.slots[idx];
-                        if (!s && !m) return true;
-                        if (!s || !m) return false;
-                        return s.song?.title === m.song?.title;
-                    });
-                    
-                    if (!isAlreadyLoaded) {
-                        lastAutoLoadedTagRef.current = loadTag;
-                        setSlots(matched.slots);
-                        showToast(`☁️ 인터넷 서버에서 ${selectedDate} 예배 선곡 목록을 성공적으로 불러왔습니다!`);
-                    }
-                }
-            }, [selectedDate, historyList]);
 
             // 화면 상태 변경 시 아이콘 및 로더 제어
             useEffect(() => {
@@ -1880,7 +1882,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.3.1</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.4.0</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -1893,7 +1895,7 @@
                                 alignItems:'center',
                                 gap:'6px'
                             }}>
-                                {isSyncing ? '🔄 서버 동기화 중...' : '☁️ 인터넷 서버 자동 저장 활성화'}
+                                {isSyncing ? '🔄 서버 동기화 중...' : '☁️ DB 수동 동기화 모드'}
                             </span>
                         </h1>
                         <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
@@ -2239,6 +2241,9 @@
                                 <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800}} onClick={()=>{
                                     fetchFromDB(false);
                                 }}>☁️ 클라우드 DB 불러오기</button>
+                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'#a78bfa', background:'rgba(167,139,250,0.1)', border:'1px solid rgba(167,139,250,0.3)', fontWeight:800}} onClick={inspectServerData}>
+                                    🔍 서버 백업 미리보기
+                                </button>
                                 <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>document.getElementById('import-f').click()}>📂 내 컴퓨터 백업 파일 불러오기</button>
                                 <input type="file" id="import-f" style={{display:'none'}} onChange={(e)=>{
                                     const file = e.target.files[0];
@@ -2306,15 +2311,14 @@
                                         [t]: newSongObj
                                     };
                                     localStorage.setItem('praise_flow_f_db', JSON.stringify(updated));
-                                    uploadToDB(updated);
                                     return updated;
                                 });
                                 document.getElementById('new-title').value = '';
                                 document.getElementById('new-lyrics').value = '';
                                 document.getElementById('new-youtube-music').value = '';
                                 document.getElementById('new-youtube-mr').value = '';
-                                showToast("✨ 보관함 및 클라우드 DB에 새 찬양이 저장되었습니다!");
-                            }}>보관함 및 클라우드 DB에 저장</button>
+                                showToast("✨ 내 찬양 보관함에 저장되었습니다! (DB 반영은 상단 [☁️ 클라우드 DB 전체 저장] 버튼 클릭)");
+                            }}>찬양 보관함에 저장</button>
 
                             <div style={{marginTop:'3rem', marginBottom:15, display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:10}}>
                                 <h3 style={{fontWeight:900, margin:0}}>보관함 목록 ({Object.keys(library).length})</h3>
@@ -2663,6 +2667,41 @@
                                     <button onClick={() => setShowHistoryModal(false)} style={{background:'none', border:'none', color:'var(--text-dim)', fontSize:'1.4rem', cursor:'pointer'}}>&times;</button>
                                 </div>
 
+                                <div style={{display:'flex', gap:10, marginBottom:12, flexWrap:'wrap'}}>
+                                    <button 
+                                        className="btn btn-primary" 
+                                        onClick={() => fetchHistoryFromDB(false)}
+                                        style={{flex:1, minWidth:'160px', padding:'8px 12px', fontSize:'0.8rem', background:'var(--primary)', color:'white', fontWeight:800, borderRadius:8}}
+                                    >
+                                        ☁️ DB 아카이브 수동 불러오기
+                                    </button>
+                                    <button 
+                                        className="btn btn-outline" 
+                                        onClick={() => {
+                                            if (selectedDate && slots.some(Boolean)) {
+                                                saveHistoryToDB(selectedDate, slots, false);
+                                            } else {
+                                                alert("현재 큐시트에 선곡된 찬양이 없거나 유효한 날짜가 지정되지 않았습니다.");
+                                            }
+                                        }}
+                                        style={{flex:1, minWidth:'160px', padding:'8px 12px', fontSize:'0.8rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800, borderRadius:8}}
+                                    >
+                                        ☁️ 현재 선곡 DB 수동 저장 ({selectedDate})
+                                    </button>
+                                    <button 
+                                        className="btn btn-outline" 
+                                        onClick={inspectServerData}
+                                        style={{flex:1, minWidth:'140px', padding:'8px 12px', fontSize:'0.8rem', color:'#a78bfa', background:'rgba(167,139,250,0.1)', border:'1px solid rgba(167,139,250,0.3)', fontWeight:800, borderRadius:8}}
+                                    >
+                                        🔍 서버 백업 미리보기
+                                    </button>
+                                </div>
+                                {lastHistorySaveTime && (
+                                    <div style={{fontSize:'0.75rem', color:'var(--text-dim)', textAlign:'right', marginTop:-6, marginBottom:10, paddingRight:4, fontWeight:700}}>
+                                        🕒 최근 아카이브 DB 저장 일시: <span style={{color:'var(--primary)'}}>{lastHistorySaveTime}</span>
+                                    </div>
+                                )}
+
                                 <div style={{display:'flex', gap:10, marginBottom:15, background:'rgba(255,255,255,0.02)', padding:10, borderRadius:12, border:'1px solid var(--border)', justifyContent:'space-between', alignItems:'center'}}>
                                     <span style={{fontSize:'0.8rem', color:'var(--text-dim)', fontWeight:700}}>💾 수동 파일 백업 관리</span>
                                     <div style={{display:'flex', gap:8, alignItems:'center'}}>
@@ -2733,8 +2772,13 @@
                                             return (
                                                 <div key={item.date} style={{background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:12, padding:15, marginBottom:10, display:'flex', justifyContent:'space-between', alignItems:'center', gap:10}}>
                                                     <div style={{flex: 1}}>
-                                                        <div style={{fontWeight:900, fontSize:'0.95rem', color:'white', marginBottom:6}}>
-                                                            📅 {item.date}
+                                                        <div style={{fontWeight:900, fontSize:'0.95rem', color:'white', marginBottom:6, display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:6}}>
+                                                            <span>📅 {item.date}</span>
+                                                            {item.updatedAt && (
+                                                                <span style={{fontSize:'0.72rem', color:'var(--text-dim)', fontWeight:600}}>
+                                                                    🕒 저장일시: {getFormattedDateTime(item.updatedAt)}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
                                                             {!hasActiveSlots ? (
@@ -2806,6 +2850,154 @@
                                 <button className="btn btn-outline" style={{width:'100%', padding:'10px', fontSize:'0.85rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:12}} onClick={() => setShowHistoryModal(false)}>
                                     닫기
                                 </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {showServerInspectionModal && (
+                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setShowServerInspectionModal(false); }}>
+                            <div className="modal-box" style={{ maxWidth: '720px', width: '92%' }} onClick={e=>e.stopPropagation()}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:15}}>
+                                    <h3 style={{fontWeight:900, fontSize:'1.15rem', color:'#a78bfa', display:'flex', alignItems:'center', gap:8, margin:0}}>
+                                        🔍 클라우드 서버 백업 실시간 데이터 미리보기
+                                    </h3>
+                                    <button onClick={() => setShowServerInspectionModal(false)} style={{background:'none', border:'none', color:'var(--text-dim)', fontSize:'1.4rem', cursor:'pointer'}}>&times;</button>
+                                </div>
+
+                                {isInspectingServer ? (
+                                    <div style={{textAlign:'center', padding:'50px 0', color:'var(--text-dim)'}}>
+                                        <p style={{fontWeight:700, fontSize:'0.95rem'}}>☁️ 클라우드 데이터베이스에서 최신 백업 데이터를 조회하는 중입니다...</p>
+                                    </div>
+                                ) : serverInspectionData ? (
+                                    <div>
+                                        <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,0.03)', padding:'10px 14px', borderRadius:12, border:'1px solid var(--border)', marginBottom:15}}>
+                                            <span style={{fontSize:'0.8rem', color:'var(--text-dim)', fontWeight:700}}>
+                                                🕒 조회 일시: <span style={{color:'white'}}>{serverInspectionData.inspectedAt}</span>
+                                            </span>
+                                            <button 
+                                                className="btn btn-outline"
+                                                onClick={inspectServerData}
+                                                style={{padding:'4px 10px', fontSize:'0.75rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:6}}
+                                            >
+                                                🔄 새로고침
+                                            </button>
+                                        </div>
+
+                                        <div style={{display:'flex', gap:10, marginBottom:15, borderBottom:'1px solid var(--border)', paddingBottom:10}}>
+                                            <button 
+                                                onClick={() => setServerInspectionTab('library')}
+                                                style={{
+                                                    padding:'8px 16px', fontSize:'0.85rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
+                                                    background: serverInspectionTab === 'library' ? 'var(--primary)' : 'rgba(255,255,255,0.05)',
+                                                    color: serverInspectionTab === 'library' ? 'white' : 'var(--text-dim)'
+                                                }}
+                                            >
+                                                🎵 저장된 찬양 보관함 ({Object.keys(serverInspectionData.library || {}).length}곡)
+                                            </button>
+                                            <button 
+                                                onClick={() => setServerInspectionTab('history')}
+                                                style={{
+                                                    padding:'8px 16px', fontSize:'0.85rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
+                                                    background: serverInspectionTab === 'history' ? 'var(--primary)' : 'rgba(255,255,255,0.05)',
+                                                    color: serverInspectionTab === 'history' ? 'white' : 'var(--text-dim)'
+                                                }}
+                                            >
+                                                📅 선곡 히스토리 아카이브 ({(serverInspectionData.history || []).length}개 날짜)
+                                            </button>
+                                        </div>
+
+                                        <div style={{maxHeight:'340px', overflowY:'auto', paddingRight:6, marginBottom:20}}>
+                                            {serverInspectionTab === 'library' ? (
+                                                <div>
+                                                    {Object.keys(serverInspectionData.library || {}).length === 0 ? (
+                                                        <div style={{textAlign:'center', color:'var(--text-dim)', padding:'40px 0'}}>
+                                                            서버에 저장된 찬양이 없습니다.
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:10}}>
+                                                            {Object.keys(serverInspectionData.library).map(title => {
+                                                                const song = serverInspectionData.library[title];
+                                                                return (
+                                                                    <div key={title} style={{background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:10, padding:12}}>
+                                                                        <div style={{fontWeight:800, fontSize:'0.85rem', color:'white', marginBottom:4}}>{title}</div>
+                                                                        <div style={{fontSize:'0.7rem', color:'var(--text-dim)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                                                            {(song.lyrics || '').slice(0, 30)}...
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <div>
+                                                    {(serverInspectionData.history || []).length === 0 ? (
+                                                        <div style={{textAlign:'center', color:'var(--text-dim)', padding:'40px 0'}}>
+                                                            서버에 저장된 예배 선곡 히스토리가 없습니다.
+                                                        </div>
+                                                    ) : (
+                                                        (serverInspectionData.history || []).map(item => (
+                                                            <div key={item.date} style={{background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:10, padding:12, marginBottom:10}}>
+                                                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6}}>
+                                                                    <span style={{fontWeight:900, color:'white', fontSize:'0.9rem'}}>📅 {item.date}</span>
+                                                                    {item.updatedAt && (
+                                                                        <span style={{fontSize:'0.72rem', color:'var(--text-dim)'}}>
+                                                                            🕒 {getFormattedDateTime(item.updatedAt)}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
+                                                                    {Array.isArray(item.slots) && item.slots.map((s, idx) => s && (
+                                                                        <span key={idx} style={{fontSize:'0.7rem', background:'rgba(167,139,250,0.1)', color:'#a78bfa', padding:'3px 8px', borderRadius:6, border:'1px solid rgba(167,139,250,0.2)'}}>
+                                                                            {s.song?.title}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        ))
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div style={{display:'flex', gap:10}}>
+                                            {serverInspectionTab === 'library' ? (
+                                                <button 
+                                                    className="btn btn-primary" 
+                                                    style={{flex:1, padding:10, fontSize:'0.85rem', fontWeight:800}}
+                                                    onClick={() => {
+                                                        if (confirm("서버에 백업된 전체 찬양 보관함 데이터를 내 앱 보관함으로 불러와 적용하시겠습니까?")) {
+                                                            setLibrary(prev => ({...prev, ...serverInspectionData.library}));
+                                                            localStorage.setItem('praise_flow_f_db', JSON.stringify({...library, ...serverInspectionData.library}));
+                                                            setShowServerInspectionModal(false);
+                                                            showToast("☁️ 서버 백업 찬양 보관함을 성공적으로 앱에 반영했습니다!");
+                                                        }
+                                                    }}
+                                                >
+                                                    📥 서버 찬양 보관함 앱으로 불러오기
+                                                </button>
+                                            ) : (
+                                                <button 
+                                                    className="btn btn-primary" 
+                                                    style={{flex:1, padding:10, fontSize:'0.85rem', fontWeight:800}}
+                                                    onClick={() => {
+                                                        if (confirm("서버에 백업된 선곡 아카이브 목록을 내 앱 아카이브로 불러와 병합하시겠습니까?")) {
+                                                            setHistoryList(serverInspectionData.history);
+                                                            localStorage.setItem('praise_flow_history', JSON.stringify(serverInspectionData.history));
+                                                            setShowServerInspectionModal(false);
+                                                            showToast("☁️ 서버 백업 선곡 아카이브를 성공적으로 앱에 반영했습니다!");
+                                                        }
+                                                    }}
+                                                >
+                                                    📥 서버 선곡 히스토리 앱으로 불러오기
+                                                </button>
+                                            )}
+                                            <button className="btn btn-outline" style={{padding:'10px 20px', fontSize:'0.85rem', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', borderRadius:12}} onClick={() => setShowServerInspectionModal(false)}>
+                                                닫기
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : null}
                             </div>
                         </div>
                     )}
@@ -2904,7 +3096,7 @@
 
                     <footer style={{marginTop:'40px', paddingTop:'20px', borderTop:'1px solid var(--border)', display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:'0.75rem', color:'var(--text-dim)', flexWrap:'wrap', gap:10}}>
                         <span>PraiseFlow PRO Smart Worship PPT System &nbsp;|&nbsp; Created by <strong style={{color:'var(--primary)'}}>kim jung hyun</strong></span>
-                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.3.1</span>
+                        <span style={{background:'rgba(255,255,255,0.03)', padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border)'}}>App Version: 1.4.0</span>
                     </footer>
 
                     {showYoutubePlayer && activeYoutubeId && (
