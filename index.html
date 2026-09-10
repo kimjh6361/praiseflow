@@ -1989,25 +1989,6 @@
                 }
             };
 
-            // 공유 링크 생성 및 복사
-            const handleShareLink = () => {
-                const hasValidSlot = slots.some(s => s !== null);
-                if (!hasValidSlot) {
-                    alert("공유할 찬양 순서가 비어 있습니다. 먼저 찬양 곡을 추가해 주세요!");
-                    return;
-                }
-                const encoded = encodeShareData(slots);
-                // 모바일용 글로벌 실시간 싱크를 위해 채널 식별자(&channel=...)를 복사 링크 꼬리에 덧붙여 제공
-                const shareUrl = `${window.location.origin}${window.location.pathname}?mode=viewer&share=${encoded}&channel=${channelId}`;
-                
-                navigator.clipboard.writeText(shareUrl).then(() => {
-                    showToast("🔗 뷰어 공유 링크가 복사되었습니다!");
-                }).catch(err => {
-                    console.error("복사 실패", err);
-                    alert("링크 복사 중 오류가 발생했습니다. 수동으로 복사해 주세요:\n" + shareUrl);
-                });
-            };
-
             // 공동 작업용 관리자 링크 복사
             const handleControllerShareLink = () => {
                 const shareUrl = `${window.location.origin}${window.location.pathname}?mode=controller&channel=${channelId}`;
@@ -2303,7 +2284,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.4</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.5</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -2320,9 +2301,6 @@
                             </span>
                         </h1>
                         <div style={{display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap'}}>
-                            <button className="btn" style={{background:'#1e1b4b', color:'#c084fc', border:'1px solid #4338ca'}} onClick={handleShareLink}>
-                                <i data-lucide="share-2"></i> 🖥️ 자막 뷰어 링크 복사
-                            </button>
                             <button className="btn" style={{background:'#022c22', color:'#34d399', border:'1px solid #065f46'}} onClick={handleControllerShareLink}>
                                 <i data-lucide="edit-3"></i> ✏️ 공동 편집 링크 복사
                             </button>
