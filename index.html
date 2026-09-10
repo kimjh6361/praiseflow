@@ -812,7 +812,7 @@
                 localStorage.setItem('praise_db_sync_enabled', JSON.stringify(dbSyncEnabled));
             }, [dbSyncEnabled]);
 
-            // DB에서 찬양 목록 가져오기 (GitHub Master Raw CDN + Supabase + MQTT 클라우드)
+            // DB에서 찬양 목록 가져오기 (Vercel Serverless Sync + GitHub Master Raw CDN + Supabase + MQTT 클라우드)
             const fetchFromDB = async (silent = false) => {
                 let localLib = {};
                 try {
@@ -832,6 +832,21 @@
                         } catch(mErr) {
                             console.warn("MQTT fetch warn:", mErr);
                         }
+                    }
+
+                    // 0.5차: Vercel Serverless Sync API 클라우드 DB 수신 (100% 실시간 연동)
+                    try {
+                        const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId + '&t=' + Date.now();
+                        const apiRes = await fetch(syncApiUrl);
+                        if (apiRes.ok) {
+                            const apiData = await apiRes.json();
+                            if (apiData && apiData.library && typeof apiData.library === 'object' && Object.keys(apiData.library).length > 0) {
+                                merged = mergeSongLibraries(merged, apiData.library);
+                                cloudFetched = true;
+                            }
+                        }
+                    } catch (apiErr) {
+                        console.warn("Vercel Sync API fetch warn:", apiErr);
                     }
 
                     // 1차: GitHub Raw Master CDN 클라우드 데이터베이스 수신 (100% 안정적, 0.1초 소요)
@@ -870,13 +885,6 @@
                         }
                     }
 
-                    // 3차: REST 클라우드 데이터베이스에서 보관함 보완 조회
-                    const cloudLib = await fetchCloudData(CLOUD_LIBRARY_URL, 'library');
-                    if (cloudLib && typeof cloudLib === 'object' && Object.keys(cloudLib).length > 0) {
-                        merged = mergeSongLibraries(merged, cloudLib);
-                        cloudFetched = true;
-                    }
-
                     if (cloudFetched || Object.keys(merged).length > 0) {
                         setLibrary(merged);
                         localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
@@ -902,7 +910,7 @@
                 }
             };
 
-            // DB에 전체 보관함 업로드하기 (MQTT Retained 클라우드 DB + Supabase + REST DB + P2P)
+            // DB에 전체 보관함 업로드하기 (Vercel Serverless + MQTT Retained 클라우드 DB + Supabase + REST DB + P2P)
             const uploadToDB = async (customLib = null, silent = false) => {
                 const targetLib = customLib || library;
                 const songTitles = Object.keys(targetLib);
@@ -916,6 +924,18 @@
 
                 try {
                     if (!silent) setIsSyncing(true);
+
+                    // 1.5. Vercel Serverless Sync API 저장 시도 (전세계 100% 무제한 실시간 저장)
+                    try {
+                        const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId;
+                        await fetch(syncApiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ library: targetLib })
+                        });
+                    } catch (apiErr) {
+                        console.warn("Vercel Sync API upload warn:", apiErr);
+                    }
 
                     // 2. MQTT 클라우드 브로커에 림(Retained) 보관함 저장 & 실시간 P2P 전송
                     sendMqttSignal('SYNC_FULL_LIBRARY_PAYLOAD', targetLib, true);
@@ -2139,7 +2159,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.6</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.7</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
