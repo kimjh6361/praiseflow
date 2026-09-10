@@ -599,47 +599,6 @@
             const [showHistoryModal, setShowHistoryModal] = useState(false);
             const [historySearchQuery, setHistorySearchQuery] = useState('');
 
-            // 시놀로지 NAS (Synology NAS) & 커스텀 클라우드 서버 연동 상태
-            const [nasServerUrl, setNasServerUrl] = useState(() => localStorage.getItem('praise_nas_server_url') || '');
-            const [showNasModal, setShowNasModal] = useState(false);
-
-            // 시놀로지 NAS 및 커스텀 서버 데이터 저장
-            const saveNasData = async (payloadKey, payloadData) => {
-                if (!nasServerUrl || !nasServerUrl.trim().startsWith('http')) return false;
-                try {
-                    const res = await fetch(nasServerUrl.trim(), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            action: 'save',
-                            channelId,
-                            key: payloadKey,
-                            data: payloadData,
-                            updatedAt: Date.now()
-                        })
-                    });
-                    return res.ok;
-                } catch(e) {
-                    console.warn("시놀로지 NAS 저장 예외 보완:", e);
-                    return false;
-                }
-            };
-
-            // 시놀로지 NAS 및 커스텀 서버 데이터 조회
-            const fetchNasData = async (payloadKey) => {
-                if (!nasServerUrl || !nasServerUrl.trim().startsWith('http')) return null;
-                try {
-                    const targetUrl = `${nasServerUrl.trim()}${nasServerUrl.includes('?') ? '&' : '?'}action=get&channel=${channelId}&key=${payloadKey}&t=${Date.now()}`;
-                    const res = await fetch(targetUrl);
-                    if (!res.ok) return null;
-                    const json = await res.json();
-                    return json && json.data ? json.data : json;
-                } catch(e) {
-                    console.warn("시놀로지 NAS 조회 예외 보완:", e);
-                    return null;
-                }
-            };
-
             const [showServerInspectionModal, setShowServerInspectionModal] = useState(false);
             const [serverInspectionData, setServerInspectionData] = useState(null);
             const [isInspectingServer, setIsInspectingServer] = useState(false);
@@ -690,26 +649,6 @@
                                 cleanHist = Object.values(hMap);
                             }
                         } catch(eSupa) {}
-                    }
-
-                    // 2차: 시놀로지 NAS 데이터가 있다면 연동
-                    const nasLib = await fetchNasData('library');
-                    if (nasLib && typeof nasLib === 'object') {
-                        cloudLib = mergeSongLibraries(cloudLib, nasLib);
-                    }
-                    const nasHist = await fetchNasData('history');
-                    if (Array.isArray(nasHist)) {
-                        const hMap = {};
-                        cleanHist.forEach(h => { if(h && h.date) hMap[h.date] = h; });
-                        nasHist.forEach(item => {
-                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY') {
-                                const existing = hMap[item.date];
-                                if (!existing || (item.updatedAt || 0) >= (existing.updatedAt || 0)) {
-                                    hMap[item.date] = item;
-                                }
-                            }
-                        });
-                        cleanHist = Object.values(hMap);
                     }
 
                     cleanHist.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -1073,19 +1012,6 @@
                         } catch (eSnap) {}
                     }
 
-                    // 2차: 시놀로지 NAS 데이터 조회
-                    const nasHist = await fetchNasData('history');
-                    if (Array.isArray(nasHist)) {
-                        nasHist.forEach(item => {
-                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY') {
-                                const itemTime = item.updatedAt || 0;
-                                if (!mergedMap[item.date] || itemTime >= (mergedMap[item.date].updatedAt || 0)) {
-                                    mergedMap[item.date] = item;
-                                }
-                            }
-                        });
-                    }
-
                     const result = Object.values(mergedMap).sort((a, b) => b.date.localeCompare(a.date));
                     setHistoryList(result);
                     localStorage.setItem('praise_flow_history', JSON.stringify(result));
@@ -1102,7 +1028,7 @@
 
             // 불량 캐시 비우기 및 클라우드 데이터 강제 재동기화
             const clearBadCacheAndSync = async () => {
-                if (confirm("8월 17일 등 옛날 굳은 캐시 데이터를 지우고, Supabase 및 시놀로지 NAS의 최신 9월 10일 클라우드 데이터로 강제 재동기화하시겠습니까?")) {
+                if (confirm("옛날 8월 17일 굳은 캐시 데이터를 지우고, Supabase 클라우드 데이터베이스의 최신 데이터로 강제 재동기화하시겠습니까?")) {
                     localStorage.removeItem('praise_flow_history');
                     localStorage.removeItem('praise_flow_f_db');
                     setHistoryList([]);
@@ -2166,7 +2092,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.0</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.1</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -2183,13 +2109,6 @@
                             </span>
                         </h1>
                         <div style={{display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap'}}>
-                            <button 
-                                className="btn" 
-                                style={{background:'rgba(56, 189, 248, 0.12)', color:'#38bdf8', border:'1px solid rgba(56, 189, 248, 0.35)', fontWeight:800}} 
-                                onClick={() => setShowNasModal(true)}
-                            >
-                                📡 개인 시놀로지 NAS 연동 {nasServerUrl ? '(연결됨)' : ''}
-                            </button>
                             <button 
                                 className="btn" 
                                 style={{background:'rgba(245, 158, 11, 0.15)', color:'#fbbf24', border:'1px solid rgba(245, 158, 11, 0.35)', fontWeight:800}} 
@@ -2604,9 +2523,6 @@
                                     <button className="btn btn-outline" style={{flex:1, minWidth:'160px', color:'white', background:'rgba(255,255,255,0.06)', border:'1px solid var(--border)', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>{
                                         fetchFromDB(false);
                                     }}>☁️ 클라우드 DB 수동 불러오기 (타 기기 가사/목록 반영)</button>
-                                    <button className="btn btn-outline" style={{flex:1, minWidth:'160px', color:'#38bdf8', background:'rgba(56, 189, 248, 0.12)', border:'1px solid rgba(56, 189, 248, 0.35)', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>setShowNasModal(true)}>
-                                        📡 개인 시놀로지 NAS 연동 {nasServerUrl ? '(연결됨)' : ''}
-                                    </button>
                                     <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'#a78bfa', background:'rgba(167,139,250,0.1)', border:'1px solid rgba(167,139,250,0.3)', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={inspectServerData}>
                                         🔍 서버 백업 미리보기
                                     </button>
@@ -3380,64 +3296,6 @@
                                         </div>
                                     </div>
                                 ) : null}
-                            </div>
-                        </div>
-                    )}
-
-                    {showNasModal && (
-                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setShowNasModal(false); }}>
-                            <div className="modal-box" style={{ maxWidth: '600px', width: '90%', padding: '2rem' }} onClick={e=>e.stopPropagation()}>
-                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'1px solid var(--border)', paddingBottom:'15px', marginBottom:'20px'}}>
-                                    <h3 style={{fontSize:'1.2rem', fontWeight:900, color:'#38bdf8', display:'flex', alignItems:'center', gap:'8px', margin:0}}>
-                                        📡 개인 시놀로지 NAS / 커스텀 클라우드 연동
-                                    </h3>
-                                    <button onClick={() => setShowNasModal(false)} style={{background:'none', border:'none', color:'white', fontSize:'1.2rem', cursor:'pointer'}}>✕</button>
-                                </div>
-
-                                <div style={{marginBottom:'20px'}}>
-                                    <label style={{fontSize:'0.85rem', fontWeight:800, color:'white', display:'block', marginBottom:'8px'}}>
-                                        🔗 시놀로지 나스(NAS) API / WebStation Server URL:
-                                    </label>
-                                    <input 
-                                        type="text" 
-                                        placeholder="http://my-synology.synology.me:5000/praise_api.php 또는 http://192.168.0.x/..." 
-                                        value={nasServerUrl} 
-                                        onChange={(e) => setNasServerUrl(e.target.value)}
-                                        style={{width:'100%', padding:'12px', background:'rgba(0,0,0,0.4)', border:'1px solid #38bdf8', borderRadius:'12px', color:'white', fontSize:'0.9rem', outline:'none', fontWeight:700}}
-                                    />
-                                    <div style={{fontSize:'0.8rem', color:'rgba(255,255,255,0.7)', marginTop:'12px', background:'rgba(56, 189, 248, 0.1)', padding:'12px', borderRadius:'12px', border:'1px solid rgba(56, 189, 248, 0.25)', lineHeight:1.5}}>
-                                        💡 <b>시놀로지 NAS 활용법 안내:</b><br />
-                                        1. 시놀로지 NAS의 <b>Web Station</b> (PHP / Node.js) 또는 WebDAV 서버에 간단한 데이터 저장/조회 API 스크립트를 작성합니다.<br />
-                                        2. 주소를 등록해두시면 무료 외부 서비스의 용량 제한이나 8월 17일 등 옛날 데이터 캐시 오류 없이 <b>100% 개인 나스 서버로 무제한 찬양 가사 & 선곡 동기화</b>가 작동합니다.
-                                    </div>
-                                </div>
-
-                                <div style={{display:'flex', gap:10}}>
-                                    <button 
-                                        className="btn btn-primary" 
-                                        style={{flex:1, background:'linear-gradient(135deg, #0284c7, #0369a1)', color:'white', fontWeight:800, padding:'12px'}}
-                                        onClick={() => {
-                                            const trimmed = nasServerUrl.trim();
-                                            setNasServerUrl(trimmed);
-                                            localStorage.setItem('praise_nas_server_url', trimmed);
-                                            setShowNasModal(false);
-                                            if (trimmed) {
-                                                showToast("📡 개인 시놀로지 NAS 서버 연동 설정이 저장되었습니다!");
-                                            } else {
-                                                showToast("📡 시놀로지 NAS 연동이 해제되고 Supabase 클라우드 기본 모드로 동작합니다.");
-                                            }
-                                        }}
-                                    >
-                                        💾 설정 저장 및 적용
-                                    </button>
-                                    <button 
-                                        className="btn btn-outline" 
-                                        style={{padding:'12px 20px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}}
-                                        onClick={() => setShowNasModal(false)}
-                                    >
-                                        닫기
-                                    </button>
-                                </div>
                             </div>
                         </div>
                     )}
