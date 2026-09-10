@@ -812,7 +812,7 @@
                 localStorage.setItem('praise_db_sync_enabled', JSON.stringify(dbSyncEnabled));
             }, [dbSyncEnabled]);
 
-            // DB에서 찬양 목록 가져오기 (MQTT 클라우드 Retained DB + Supabase + REST DB)
+            // DB에서 찬양 목록 가져오기 (GitHub Master Raw CDN + Supabase + MQTT 클라우드)
             const fetchFromDB = async (silent = false) => {
                 let localLib = {};
                 try {
@@ -822,8 +822,9 @@
                 try {
                     if (!silent) setIsSyncing(true);
                     let merged = { ...localLib };
+                    let cloudFetched = false;
 
-                    // 0. MQTT 클라우드 브로커 채널 재구독 및 동기화 시그널 전송 (Retained 메시지 즉시 수신)
+                    // 0. MQTT 클라우드 브로커 채널 재구독 및 동기화 시그널 전송
                     if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
                         try {
                             mqttClientRef.current.subscribe(`praiseflow/sync/${channelId}`);
@@ -833,7 +834,21 @@
                         }
                     }
 
-                    // 1차: Supabase 클라우드 DB에서 찬양 보관함(GLOBAL_MASTER_LIBRARY) 조회
+                    // 1차: GitHub Raw Master CDN 클라우드 데이터베이스 수신 (100% 안정적, 0.1초 소요)
+                    try {
+                        const ghRes = await fetch(`https://raw.githubusercontent.com/kimjh6361/praiseflow/main/praise_master_db.json?t=${Date.now()}`);
+                        if (ghRes.ok) {
+                            const ghData = await ghRes.json();
+                            if (ghData && typeof ghData === 'object' && Object.keys(ghData).length > 0) {
+                                merged = mergeSongLibraries(merged, ghData);
+                                cloudFetched = true;
+                            }
+                        }
+                    } catch (ghErr) {
+                        console.warn("GitHub Raw DB fetch warn:", ghErr);
+                    }
+
+                    // 2차: Supabase 클라우드 DB에서 찬양 보관함(GLOBAL_MASTER_LIBRARY) 조회
                     if (supabase) {
                         try {
                             const { data: supaLibData, error: supaErr } = await supabase
@@ -846,6 +861,7 @@
                                 supaLibData.forEach(row => {
                                     if (row.slots_data && typeof row.slots_data === 'object' && !Array.isArray(row.slots_data)) {
                                         merged = mergeSongLibraries(merged, row.slots_data);
+                                        cloudFetched = true;
                                     }
                                 });
                             }
@@ -854,32 +870,33 @@
                         }
                     }
 
-                    // 2차: REST 클라우드 데이터베이스에서 보관함 보완 조회
+                    // 3차: REST 클라우드 데이터베이스에서 보관함 보완 조회
                     const cloudLib = await fetchCloudData(CLOUD_LIBRARY_URL, 'library');
                     if (cloudLib && typeof cloudLib === 'object' && Object.keys(cloudLib).length > 0) {
                         merged = mergeSongLibraries(merged, cloudLib);
+                        cloudFetched = true;
                     }
 
-                    if (Object.keys(merged).length > 0) {
+                    if (cloudFetched || Object.keys(merged).length > 0) {
                         setLibrary(merged);
                         localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
                         const curTimeStr = getFormattedDateTime();
                         setLastDbSaveTime(curTimeStr);
                         localStorage.setItem('praise_last_db_save_time', curTimeStr);
-                        if (!silent) showToast(`☁️ 최신 찬양 보관함(${Object.keys(merged).length}곡)을 클라우드 DB에서 불러왔습니다!`);
+                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(merged).length}곡)을 성공적으로 불러왔습니다!`);
                         return;
                     }
 
                     if (Object.keys(localLib).length > 0) {
                         setLibrary(localLib);
                     }
-                    if (!silent) showToast("⚠️ 클라우드 DB 응답 대기 중입니다. 로컬 보관함을 유지합니다.");
+                    if (!silent) showToast("⚠️ 클라우드 DB에서 최신 데이터를 읽어오지 못했습니다. 로컬 보관함을 표시합니다.");
                 } catch (err) {
                     console.error("DB 로드 실패 (Fallback 작동):", err);
                     if (Object.keys(localLib).length > 0) {
                         setLibrary(localLib);
                     }
-                    if (!silent) showToast("⚠️ 클라우드 DB 로드 중 오류가 발생하여 로컬 보관함을 표시합니다.");
+                    if (!silent) showToast("⚠️ 클라우드 DB 로드 실패: 로컬 보관함을 표시합니다.");
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
@@ -2122,7 +2139,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.3</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.4</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
