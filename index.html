@@ -631,7 +631,7 @@
                         const apiRes = await fetch(syncApiUrl);
                         if (apiRes.ok) {
                             const apiData = await apiRes.json();
-                            if (apiData && apiData.library && typeof apiData.library === 'object') {
+                            if (apiData && apiData.library && typeof apiData.library === 'object' && Object.keys(apiData.library).length > 0) {
                                 cloudLib = apiData.library;
                             }
                             if (apiData && Array.isArray(apiData.slots)) {
@@ -645,55 +645,36 @@
                         console.warn("Vercel Sync inspection fetch warn:", vErr);
                     }
 
-                    // 2차: Supabase 클라우드 데이터베이스 조회 보완
-                    if (supabase) {
+                    // 2차: GitHub Raw Master CDN 클라우드 DB 수신 (마스터 53곡 데이터 백업 보완)
+                    if (Object.keys(cloudLib).length === 0) {
                         try {
-                            if (Object.keys(cloudLib).length === 0) {
-                                const { data: supaLib } = await supabase
-                                    .from('praise_history')
-                                    .select('slots_data')
-                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
-                                    .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
-                                if (supaLib && supaLib.length > 0 && supaLib[0].slots_data) {
-                                    cloudLib = supaLib[0].slots_data;
+                            const ghRes = await fetch(`https://raw.githubusercontent.com/kimjh6361/praiseflow/main/praise_master_db.json?t=${Date.now()}`);
+                            if (ghRes.ok) {
+                                const ghData = await ghRes.json();
+                                if (ghData && typeof ghData === 'object' && Object.keys(ghData).length > 0) {
+                                    cloudLib = ghData;
                                 }
                             }
+                        } catch (ghErr) {
+                            console.warn("GitHub Raw DB fetch warn:", ghErr);
+                        }
+                    }
 
-                            if (!Array.isArray(cloudSlots) || cloudSlots.length === 0) {
-                                const { data: supaSlots } = await supabase
-                                    .from('praise_history')
-                                    .select('slots_data')
-                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
-                                    .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
-                                if (supaSlots && supaSlots.length > 0 && Array.isArray(supaSlots[0].slots_data)) {
-                                    cloudSlots = supaSlots[0].slots_data;
-                                }
-                            }
-
-                            if (!cleanHist || cleanHist.length === 0) {
-                                const { data: supaHist } = await supabase
-                                    .from('praise_history')
-                                    .select('slots_data')
-                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
-                                    .eq('event_date', 'GLOBAL_MASTER_HISTORY');
-                                if (supaHist && supaHist.length > 0) {
-                                    const hMap = {};
-                                    supaHist.forEach(r => {
-                                        if (Array.isArray(r.slots_data)) {
-                                            r.slots_data.forEach(item => {
-                                                if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY' && item.date !== 'CURRENT_SLOTS_SNAPSHOT') {
-                                                    const existing = hMap[item.date];
-                                                    if (!existing || (item.updatedAt || 0) >= (existing.updatedAt || 0)) {
-                                                        hMap[item.date] = item;
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    });
-                                    cleanHist = Object.values(hMap);
-                                }
-                            }
-                        } catch(eSupa) {}
+                    // 3차: 로컬 스토리지 Fallback 보완
+                    if (Object.keys(cloudLib).length === 0) {
+                        try {
+                            cloudLib = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
+                        } catch(e) {}
+                    }
+                    if (!Array.isArray(cloudSlots) || cloudSlots.length === 0) {
+                        try {
+                            cloudSlots = JSON.parse(localStorage.getItem('praise_flow_slots') || '[]');
+                        } catch(e) {}
+                    }
+                    if (!cleanHist || cleanHist.length === 0) {
+                        try {
+                            cleanHist = JSON.parse(localStorage.getItem('praise_flow_history') || '[]');
+                        } catch(e) {}
                     }
 
                     cleanHist.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -2335,7 +2316,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.2</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.3</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
