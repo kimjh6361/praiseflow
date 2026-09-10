@@ -19,7 +19,27 @@
     <style>
         :root { --primary: #c084fc; --secondary: #22c55e; --bg: #0b0b0f; --card-bg: #18181b; --text-main: #fafafa; --text-dim: #71717a; --border: #27272a; --danger: #ef4444; }
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-        body { background-color: var(--bg); color: var(--text-main); min-height: 100vh; overflow-x: hidden; }
+        body { background-color: var(--bg); color: var(--text-main); min-height: 100vh; overflow-x: hidden; transition: background-color 0.3s ease, color 0.3s ease; }
+        
+        /* 화이트 (밝은) 배경 테마 */
+        body.light-theme {
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #0f172a;
+            --text-dim: #475569;
+            --border: #cbd5e1;
+        }
+        body.light-theme .app-container { color: #0f172a; }
+        body.light-theme .tabs { background: #ffffff; border-color: #cbd5e1; }
+        body.light-theme .tab { color: #64748b; }
+        body.light-theme .tab.active { background: #9333ea; color: white; }
+        body.light-theme .slot-card { background: #ffffff; border-color: #cbd5e1; box-shadow: 0 4px 15px rgba(0,0,0,0.04); }
+        body.light-theme .preview-item { background: #f1f5f9; border-color: #e2e8f0; color: #0f172a; }
+        body.light-theme .preview-item:hover { background: #e2e8f0; border-color: #9333ea; }
+        body.light-theme .preview-item.active { background: rgba(34, 197, 94, 0.15); border-color: #16a34a; color: #065f46; }
+        body.light-theme .modal-box { background: #ffffff; border-color: #cbd5e1; color: #0f172a; }
+        body.light-theme input, body.light-theme textarea, body.light-theme select { background: #ffffff !important; color: #0f172a !important; border-color: #cbd5e1 !important; }
+        body.light-theme code { background: #e2e8f0 !important; color: #7e22ce !important; }
         
         #loader { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10000; }
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -254,6 +274,22 @@
             const [mode] = useState(() => new URLSearchParams(window.location.search).get('mode') || 'controller');
             const [view, setView] = useState('planner');
             const [toastMsg, setToastMsg] = useState('');
+
+            // 앱 배경화면 테마 상태 ('dark' 또는 'light')
+            const [appTheme, setAppTheme] = useState(() => localStorage.getItem('praise_app_theme') || 'dark');
+
+            useEffect(() => {
+                localStorage.setItem('praise_app_theme', appTheme);
+                if (appTheme === 'light') {
+                    document.body.classList.add('light-theme');
+                } else {
+                    document.body.classList.remove('light-theme');
+                }
+            }, [appTheme]);
+
+            const toggleAppTheme = () => {
+                setAppTheme(prev => prev === 'dark' ? 'light' : 'dark');
+            };
 
             // 외부 송출창 연동 상태 (체크 안하면 한 화면에서 조작 및 모니터링 수행)
             const [externalPresent, setExternalPresent] = useState(false);
@@ -2350,7 +2386,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.8</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.9</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -2367,6 +2403,19 @@
                             </span>
                         </h1>
                         <div style={{display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap'}}>
+                            <button 
+                                className="btn" 
+                                style={{
+                                    background: appTheme === 'light' ? 'rgba(147, 51, 234, 0.12)' : 'rgba(255, 255, 255, 0.08)',
+                                    color: appTheme === 'light' ? '#7e22ce' : '#facc15',
+                                    border: appTheme === 'light' ? '1px solid rgba(147, 51, 234, 0.35)' : '1px solid rgba(250, 204, 21, 0.35)',
+                                    fontWeight: 800
+                                }} 
+                                onClick={toggleAppTheme}
+                                title={appTheme === 'light' ? '다크(어두운) 배경 테마로 전환합니다' : '화이트(밝은) 배경 테마로 전환합니다'}
+                            >
+                                {appTheme === 'light' ? '🌙 다크 배경 모드' : '☀️ 화이트 배경 모드'}
+                            </button>
                             <button 
                                 className="btn" 
                                 style={{
