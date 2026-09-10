@@ -622,44 +622,76 @@
                 setShowServerInspectionModal(true);
                 try {
                     let cloudLib = {};
+                    let cloudSlots = [];
                     let cleanHist = [];
 
-                    // 1차: Supabase 클라우드 데이터베이스 조회
+                    // 1차: Vercel Serverless Sync API 실시간 클라우드 DB 조회
+                    try {
+                        const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId + '&t=' + Date.now();
+                        const apiRes = await fetch(syncApiUrl);
+                        if (apiRes.ok) {
+                            const apiData = await apiRes.json();
+                            if (apiData && apiData.library && typeof apiData.library === 'object') {
+                                cloudLib = apiData.library;
+                            }
+                            if (apiData && Array.isArray(apiData.slots)) {
+                                cloudSlots = apiData.slots;
+                            }
+                            if (apiData && Array.isArray(apiData.history)) {
+                                cleanHist = apiData.history;
+                            }
+                        }
+                    } catch (vErr) {
+                        console.warn("Vercel Sync inspection fetch warn:", vErr);
+                    }
+
+                    // 2차: Supabase 클라우드 데이터베이스 조회 보완
                     if (supabase) {
                         try {
-                            const { data: supaLib } = await supabase
-                                .from('praise_history')
-                                .select('slots_data')
-                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
-                                .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
-                            if (supaLib && supaLib.length > 0) {
-                                supaLib.forEach(r => {
-                                    if (r.slots_data && typeof r.slots_data === 'object' && !Array.isArray(r.slots_data)) {
-                                        cloudLib = mergeSongLibraries(cloudLib, r.slots_data);
-                                    }
-                                });
+                            if (Object.keys(cloudLib).length === 0) {
+                                const { data: supaLib } = await supabase
+                                    .from('praise_history')
+                                    .select('slots_data')
+                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                    .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                if (supaLib && supaLib.length > 0 && supaLib[0].slots_data) {
+                                    cloudLib = supaLib[0].slots_data;
+                                }
                             }
 
-                            const { data: supaHist } = await supabase
-                                .from('praise_history')
-                                .select('slots_data')
-                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
-                                .eq('event_date', 'GLOBAL_MASTER_HISTORY');
-                            if (supaHist && supaHist.length > 0) {
-                                const hMap = {};
-                                supaHist.forEach(r => {
-                                    if (Array.isArray(r.slots_data)) {
-                                        r.slots_data.forEach(item => {
-                                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY') {
-                                                const existing = hMap[item.date];
-                                                if (!existing || (item.updatedAt || 0) >= (existing.updatedAt || 0)) {
-                                                    hMap[item.date] = item;
+                            if (!Array.isArray(cloudSlots) || cloudSlots.length === 0) {
+                                const { data: supaSlots } = await supabase
+                                    .from('praise_history')
+                                    .select('slots_data')
+                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                    .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+                                if (supaSlots && supaSlots.length > 0 && Array.isArray(supaSlots[0].slots_data)) {
+                                    cloudSlots = supaSlots[0].slots_data;
+                                }
+                            }
+
+                            if (!cleanHist || cleanHist.length === 0) {
+                                const { data: supaHist } = await supabase
+                                    .from('praise_history')
+                                    .select('slots_data')
+                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                    .eq('event_date', 'GLOBAL_MASTER_HISTORY');
+                                if (supaHist && supaHist.length > 0) {
+                                    const hMap = {};
+                                    supaHist.forEach(r => {
+                                        if (Array.isArray(r.slots_data)) {
+                                            r.slots_data.forEach(item => {
+                                                if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY' && item.date !== 'CURRENT_SLOTS_SNAPSHOT') {
+                                                    const existing = hMap[item.date];
+                                                    if (!existing || (item.updatedAt || 0) >= (existing.updatedAt || 0)) {
+                                                        hMap[item.date] = item;
+                                                    }
                                                 }
-                                            }
-                                        });
-                                    }
-                                });
-                                cleanHist = Object.values(hMap);
+                                            });
+                                        }
+                                    });
+                                    cleanHist = Object.values(hMap);
+                                }
                             }
                         } catch(eSupa) {}
                     }
@@ -668,6 +700,7 @@
 
                     setServerInspectionData({
                         library: typeof cloudLib === 'object' ? cloudLib : {},
+                        slots: Array.isArray(cloudSlots) ? cloudSlots : [],
                         history: cleanHist,
                         inspectedAt: getFormattedDateTime()
                     });
@@ -2302,7 +2335,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.1</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.2</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -3391,11 +3424,11 @@
                                             </button>
                                         </div>
 
-                                        <div style={{display:'flex', gap:10, marginBottom:15, borderBottom:'1px solid var(--border)', paddingBottom:10}}>
+                                        <div style={{display:'flex', gap:8, marginBottom:15, borderBottom:'1px solid var(--border)', paddingBottom:10, flexWrap:'wrap'}}>
                                             <button 
                                                 onClick={() => setServerInspectionTab('library')}
                                                 style={{
-                                                    padding:'8px 16px', fontSize:'0.85rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
+                                                    padding:'8px 14px', fontSize:'0.82rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
                                                     background: serverInspectionTab === 'library' ? 'var(--primary)' : 'rgba(255,255,255,0.05)',
                                                     color: serverInspectionTab === 'library' ? 'white' : 'var(--text-dim)'
                                                 }}
@@ -3403,19 +3436,29 @@
                                                 🎵 저장된 찬양 보관함 ({Object.keys(serverInspectionData.library || {}).length}곡)
                                             </button>
                                             <button 
+                                                onClick={() => setServerInspectionTab('slots')}
+                                                style={{
+                                                    padding:'8px 14px', fontSize:'0.82rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
+                                                    background: serverInspectionTab === 'slots' ? 'var(--primary)' : 'rgba(255,255,255,0.05)',
+                                                    color: serverInspectionTab === 'slots' ? 'white' : 'var(--text-dim)'
+                                                }}
+                                            >
+                                                📋 예배 순서 큐시트 ({(serverInspectionData.slots || []).filter(Boolean).length}곡)
+                                            </button>
+                                            <button 
                                                 onClick={() => setServerInspectionTab('history')}
                                                 style={{
-                                                    padding:'8px 16px', fontSize:'0.85rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
+                                                    padding:'8px 14px', fontSize:'0.82rem', fontWeight:800, border:'none', borderRadius:8, cursor:'pointer',
                                                     background: serverInspectionTab === 'history' ? 'var(--primary)' : 'rgba(255,255,255,0.05)',
                                                     color: serverInspectionTab === 'history' ? 'white' : 'var(--text-dim)'
                                                 }}
                                             >
-                                                📅 선곡 히스토리 아카이브 ({(serverInspectionData.history || []).length}개 날짜)
+                                                📅 선곡 히스토리 ({(serverInspectionData.history || []).length}개 날짜)
                                             </button>
                                         </div>
 
                                         <div style={{maxHeight:'340px', overflowY:'auto', paddingRight:6, marginBottom:20}}>
-                                            {serverInspectionTab === 'library' ? (
+                                            {serverInspectionTab === 'library' && (
                                                 <div>
                                                     {Object.keys(serverInspectionData.library || {}).length === 0 ? (
                                                         <div style={{textAlign:'center', color:'var(--text-dim)', padding:'40px 0'}}>
@@ -3437,7 +3480,36 @@
                                                         </div>
                                                     )}
                                                 </div>
-                                            ) : (
+                                            )}
+
+                                            {serverInspectionTab === 'slots' && (
+                                                <div>
+                                                    {(serverInspectionData.slots || []).filter(Boolean).length === 0 ? (
+                                                        <div style={{textAlign:'center', color:'var(--text-dim)', padding:'40px 0'}}>
+                                                            서버에 저장된 예배 순서 큐시트 곡이 없습니다.
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{display:'flex', flexDirection:'column', gap:10}}>
+                                                            {(serverInspectionData.slots || []).map((slot, idx) => slot && (
+                                                                <div key={idx} style={{background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:10, padding:12, display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                                                    <div>
+                                                                        <span style={{fontSize:'0.75rem', fontWeight:800, color:'var(--primary)', marginRight:8}}>Slot #{idx + 1}</span>
+                                                                        <strong style={{color:'white', fontSize:'0.9rem'}}>{slot.song?.title}</strong>
+                                                                        <div style={{fontSize:'0.72rem', color:'var(--text-dim)', marginTop:4}}>
+                                                                            {(slot.song?.lyrics || '').slice(0, 40)}...
+                                                                        </div>
+                                                                    </div>
+                                                                    {slot.themeUrl && (
+                                                                        <span style={{fontSize:'0.68rem', background:'rgba(167,139,250,0.1)', color:'#a78bfa', padding:'3px 8px', borderRadius:6}}>배경 테마 적용</span>
+                                                                    )}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {serverInspectionTab === 'history' && (
                                                 <div>
                                                     {(serverInspectionData.history || []).length === 0 ? (
                                                         <div style={{textAlign:'center', color:'var(--text-dim)', padding:'40px 0'}}>
