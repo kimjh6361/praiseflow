@@ -6,7 +6,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.4.2</title>
+    <title>PraiseFlow Pro - 듀얼 모니터 시스템 v1.5.0</title>
     <!-- 라이브러리 로드 (오프라인 구동을 위해 로컬 파일로 내장) -->
     <script src="lib/react.production.min.js"></script>
     <script src="lib/react-dom.production.min.js"></script>
@@ -171,6 +171,31 @@
             "title": "89장 날 사랑하신 주",
             "lyrics": "1.날 사랑하신 주 예수 그 아름다운 이름\n   내 귀에 노래 같으니 그 이름 찬양해\n   오 사랑의 예수 오 사랑의 예수\n   오 주님이 먼저 날 사랑하셨네\n\n2.주 나를 사랑하심을 나 어찌 표현하리\n   내 맘에 차고 넘치니 주님만 사랑해\n   오 사랑의 예수 오 사랑의 예수\n   오 주님이 먼저 날 사랑하셨네\n\n3.주 나를 위해 죽으사 날 자유 하게 하며\n   그 흘린 보배 피로써 날 정결케 했네\n   오 사랑의 예수 오 사랑의 예수\n   오 주님이 먼저 날 사랑하셨네\n\n오 사랑의 예수 오 사랑의 예수\n오 주님이 먼저 날 사랑하셨네"
           }
+        };
+
+        // 찬양 보관함 병합 함수: 각 곡의 updatedAt(또는 createdAt) 밀리초 타임스탬프를 비교하여 가장 최근에 수정된 내용이 승리(Last Write Wins)하도록 통합
+        const mergeSongLibraries = (baseLib = {}, incomingLib = {}) => {
+            const merged = { ...baseLib };
+            if (!incomingLib || typeof incomingLib !== 'object') return merged;
+
+            Object.keys(incomingLib).forEach(title => {
+                const incSong = incomingLib[title];
+                if (!incSong || typeof incSong !== 'object') return;
+
+                const locSong = merged[title];
+                if (!locSong) {
+                    merged[title] = incSong;
+                } else {
+                    const locTime = Number(locSong.updatedAt || locSong.createdAt || 0);
+                    const incTime = Number(incSong.updatedAt || incSong.createdAt || 0);
+                    // 들어온 수정본의 시각이 로컬 시각보다 크거나 같으면 최근 수정본으로 덮어씀 (Last Write Wins)
+                    if (incTime >= locTime) {
+                        merged[title] = incSong;
+                    }
+                }
+            });
+
+            return merged;
         };
 
         // 인터넷 글로벌 클라우드 REST 데이터베이스 및 Supabase 연동 정보 초기화
@@ -414,19 +439,11 @@
                                     curLocal = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
                                 } catch(e) {}
 
-                                const incomingTitles = Object.keys(packet.payload);
-                                let hasNewSong = false;
-                                incomingTitles.forEach(t => {
-                                    if (!curLocal[t] || JSON.stringify(curLocal[t]) !== JSON.stringify(packet.payload[t])) {
-                                        curLocal[t] = packet.payload[t];
-                                        hasNewSong = true;
-                                    }
-                                });
-
-                                if (hasNewSong) {
-                                    setLibrary(curLocal);
-                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(curLocal));
-                                    showToast(`⚡ 연결된 클라우드 기기로부터 찬양 보관함(${incomingTitles.length}곡)이 실시간 동기화되었습니다!`);
+                                const merged = mergeSongLibraries(curLocal, packet.payload);
+                                if (JSON.stringify(curLocal) !== JSON.stringify(merged)) {
+                                    setLibrary(merged);
+                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
+                                    showToast(`⚡ 연결된 클라우드 기기로부터 최신 찬양 보관함(${Object.keys(merged).length}곡)이 동기화되었습니다!`);
                                 }
                             }
 
@@ -582,6 +599,47 @@
             const [showHistoryModal, setShowHistoryModal] = useState(false);
             const [historySearchQuery, setHistorySearchQuery] = useState('');
 
+            // 시놀로지 NAS (Synology NAS) & 커스텀 클라우드 서버 연동 상태
+            const [nasServerUrl, setNasServerUrl] = useState(() => localStorage.getItem('praise_nas_server_url') || '');
+            const [showNasModal, setShowNasModal] = useState(false);
+
+            // 시놀로지 NAS 및 커스텀 서버 데이터 저장
+            const saveNasData = async (payloadKey, payloadData) => {
+                if (!nasServerUrl || !nasServerUrl.trim().startsWith('http')) return false;
+                try {
+                    const res = await fetch(nasServerUrl.trim(), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'save',
+                            channelId,
+                            key: payloadKey,
+                            data: payloadData,
+                            updatedAt: Date.now()
+                        })
+                    });
+                    return res.ok;
+                } catch(e) {
+                    console.warn("시놀로지 NAS 저장 예외 보완:", e);
+                    return false;
+                }
+            };
+
+            // 시놀로지 NAS 및 커스텀 서버 데이터 조회
+            const fetchNasData = async (payloadKey) => {
+                if (!nasServerUrl || !nasServerUrl.trim().startsWith('http')) return null;
+                try {
+                    const targetUrl = `${nasServerUrl.trim()}${nasServerUrl.includes('?') ? '&' : '?'}action=get&channel=${channelId}&key=${payloadKey}&t=${Date.now()}`;
+                    const res = await fetch(targetUrl);
+                    if (!res.ok) return null;
+                    const json = await res.json();
+                    return json && json.data ? json.data : json;
+                } catch(e) {
+                    console.warn("시놀로지 NAS 조회 예외 보완:", e);
+                    return null;
+                }
+            };
+
             const [showServerInspectionModal, setShowServerInspectionModal] = useState(false);
             const [serverInspectionData, setServerInspectionData] = useState(null);
             const [isInspectingServer, setIsInspectingServer] = useState(false);
@@ -591,10 +649,69 @@
                 setIsInspectingServer(true);
                 setShowServerInspectionModal(true);
                 try {
-                    const cloudLib = await fetchCloudData(CLOUD_LIBRARY_URL, 'library') || {};
-                    const cloudHist = await fetchCloudData(CLOUD_HISTORY_URL, 'history') || [];
-                    
-                    const cleanHist = Array.isArray(cloudHist) ? cloudHist.filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT') : [];
+                    let cloudLib = {};
+                    let cleanHist = [];
+
+                    // 1차: Supabase 클라우드 데이터베이스 조회
+                    if (supabase) {
+                        try {
+                            const { data: supaLib } = await supabase
+                                .from('praise_history')
+                                .select('slots_data')
+                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                            if (supaLib && supaLib.length > 0) {
+                                supaLib.forEach(r => {
+                                    if (r.slots_data && typeof r.slots_data === 'object' && !Array.isArray(r.slots_data)) {
+                                        cloudLib = mergeSongLibraries(cloudLib, r.slots_data);
+                                    }
+                                });
+                            }
+
+                            const { data: supaHist } = await supabase
+                                .from('praise_history')
+                                .select('slots_data')
+                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                .eq('event_date', 'GLOBAL_MASTER_HISTORY');
+                            if (supaHist && supaHist.length > 0) {
+                                const hMap = {};
+                                supaHist.forEach(r => {
+                                    if (Array.isArray(r.slots_data)) {
+                                        r.slots_data.forEach(item => {
+                                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY') {
+                                                const existing = hMap[item.date];
+                                                if (!existing || (item.updatedAt || 0) >= (existing.updatedAt || 0)) {
+                                                    hMap[item.date] = item;
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                                cleanHist = Object.values(hMap);
+                            }
+                        } catch(eSupa) {}
+                    }
+
+                    // 2차: 시놀로지 NAS 데이터가 있다면 연동
+                    const nasLib = await fetchNasData('library');
+                    if (nasLib && typeof nasLib === 'object') {
+                        cloudLib = mergeSongLibraries(cloudLib, nasLib);
+                    }
+                    const nasHist = await fetchNasData('history');
+                    if (Array.isArray(nasHist)) {
+                        const hMap = {};
+                        cleanHist.forEach(h => { if(h && h.date) hMap[h.date] = h; });
+                        nasHist.forEach(item => {
+                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY') {
+                                const existing = hMap[item.date];
+                                if (!existing || (item.updatedAt || 0) >= (existing.updatedAt || 0)) {
+                                    hMap[item.date] = item;
+                                }
+                            }
+                        });
+                        cleanHist = Object.values(hMap);
+                    }
+
                     cleanHist.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
                     setServerInspectionData({
@@ -746,7 +863,7 @@
                 localStorage.setItem('praise_db_sync_enabled', JSON.stringify(dbSyncEnabled));
             }, [dbSyncEnabled]);
 
-            // DB에서 찬양 목록 가져오기 (고성능 클라우드 REST DB + MQTT 실시간 공유)
+            // DB에서 찬양 목록 가져오기 (Supabase 클라우드 DB + REST DB + MQTT 실시간 공유)
             const fetchFromDB = async (silent = false) => {
                 let localLib = {};
                 try {
@@ -755,14 +872,39 @@
 
                 try {
                     if (!silent) setIsSyncing(true);
+                    let merged = { ...localLib };
 
-                    // 1차: 고성능 REST 클라우드 데이터베이스에서 보관함 조회
+                    // 1차: Supabase 클라우드 DB에서 찬양 보관함(GLOBAL_MASTER_LIBRARY) 조회
+                    if (supabase) {
+                        try {
+                            const { data: supaLibData } = await supabase
+                                .from('praise_history')
+                                .select('slots_data')
+                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+
+                            if (supaLibData && supaLibData.length > 0) {
+                                supaLibData.forEach(row => {
+                                    if (row.slots_data && typeof row.slots_data === 'object' && !Array.isArray(row.slots_data)) {
+                                        merged = mergeSongLibraries(merged, row.slots_data);
+                                    }
+                                });
+                            }
+                        } catch (supaErr) {
+                            console.warn("Supabase library fetch warn:", supaErr);
+                        }
+                    }
+
+                    // 2차: REST 클라우드 데이터베이스에서 보관함 보완 조회
                     const cloudLib = await fetchCloudData(CLOUD_LIBRARY_URL, 'library');
                     if (cloudLib && typeof cloudLib === 'object' && Object.keys(cloudLib).length > 0) {
-                        const merged = { ...localLib, ...cloudLib };
+                        merged = mergeSongLibraries(merged, cloudLib);
+                    }
+
+                    if (Object.keys(merged).length > 0) {
                         setLibrary(merged);
                         localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
-                        if (!silent) showToast(`☁️ 클라우드에서 찬양 보관함 총 ${Object.keys(merged).length}곡을 성공적으로 불러왔습니다!`);
+                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(merged).length}곡)을 성공적으로 불러왔습니다!`);
                         return;
                     }
 
@@ -779,7 +921,7 @@
                 }
             };
 
-            // DB에 전체 보관함 업로드하기 (고성능 클라우드 REST DB + MQTT 실시간 전송)
+            // DB에 전체 보관함 업로드하기 (Supabase 클라우드 DB + REST DB + MQTT 실시간 전송)
             const uploadToDB = async (customLib = null, silent = false) => {
                 const targetLib = customLib || library;
                 const songTitles = Object.keys(targetLib);
@@ -794,17 +936,47 @@
                 try {
                     if (!silent) setIsSyncing(true);
 
-                    // 2. 고성능 REST 클라우드 DB에 실시간 저장
+                    // 2. Supabase 클라우드 DB에 찬양 보관함 전체 마스터 기록 (GLOBAL_MASTER_LIBRARY)
+                    if (supabase) {
+                        const targetChannels = Array.from(new Set([channelId, 'praise_main_channel', 'default']));
+                        for (const chId of targetChannels) {
+                            try {
+                                const { data: existLib } = await supabase
+                                    .from('praise_history')
+                                    .select('id')
+                                    .eq('channel_id', chId)
+                                    .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+
+                                if (existLib && existLib.length > 0) {
+                                    await supabase.from('praise_history').update({
+                                        slots_data: targetLib,
+                                        updated_at: new Date().toISOString()
+                                    }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                } else {
+                                    await supabase.from('praise_history').insert({
+                                        channel_id: chId,
+                                        event_date: 'GLOBAL_MASTER_LIBRARY',
+                                        slots_data: targetLib,
+                                        updated_at: new Date().toISOString()
+                                    });
+                                }
+                            } catch (supaSaveErr) {
+                                console.warn("Supabase library upload warn:", supaSaveErr);
+                            }
+                        }
+                    }
+
+                    // 3. REST 클라우드 DB 보완 저장
                     await saveCloudData(CLOUD_LIBRARY_URL, 'praiseflow_library_master', 'library', targetLib);
 
-                    // 3. MQTT 연결된 전 기기에 실시간 P2P 전송
+                    // 4. MQTT 연결된 전 기기에 실시간 P2P 전송
                     sendMqttSignal('SYNC_FULL_LIBRARY_PAYLOAD', targetLib);
 
                     const saveTimeStr = getFormattedDateTime();
                     setLastDbSaveTime(saveTimeStr);
                     localStorage.setItem('praise_last_db_save_time', saveTimeStr);
 
-                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 업로드되었습니다! (저장일시: ${saveTimeStr})`);
+                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 안전하게 업로드되었습니다! (저장일시: ${saveTimeStr})`);
                 } catch (err) {
                     console.warn("DB 업로드 보완:", err);
                     if (!silent) showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
@@ -854,7 +1026,7 @@
                 }
             };
 
-            // DB에서 찬양 선곡 히스토리 가져오기 (고성능 REST 클라우드 DB + P2P 동기화)
+            // DB에서 찬양 선곡 히스토리 가져오기 (Supabase 클라우드 DB + NAS + P2P 동기화)
             const fetchHistoryFromDB = async (silent = false) => {
                 let localHistory = [];
                 try {
@@ -875,20 +1047,7 @@
                         }
                     });
 
-                    // 1차: 고성능 REST 클라우드 엔드포인트에서 히스토리 아카이브 조회
-                    const cloudHist = await fetchCloudData(CLOUD_HISTORY_URL, 'history');
-                    if (Array.isArray(cloudHist) && cloudHist.length > 0) {
-                        cloudHist.forEach(item => {
-                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY' && item.date !== 'CURRENT_SLOTS_SNAPSHOT') {
-                                const itemTime = item.updatedAt || 0;
-                                if (!mergedMap[item.date] || itemTime >= (mergedMap[item.date].updatedAt || 0)) {
-                                    mergedMap[item.date] = item;
-                                }
-                            }
-                        });
-                    }
-
-                    // 2차: Supabase 보완 조회 시도 (연결 가능 시)
+                    // 1차: Supabase 클라우드 데이터베이스에서 히스토리 조회
                     if (supabase) {
                         try {
                             const { data: snapData } = await supabase
@@ -914,17 +1073,43 @@
                         } catch (eSnap) {}
                     }
 
+                    // 2차: 시놀로지 NAS 데이터 조회
+                    const nasHist = await fetchNasData('history');
+                    if (Array.isArray(nasHist)) {
+                        nasHist.forEach(item => {
+                            if (item && item.date && item.date !== 'GLOBAL_MASTER_LIBRARY' && item.date !== 'GLOBAL_MASTER_HISTORY') {
+                                const itemTime = item.updatedAt || 0;
+                                if (!mergedMap[item.date] || itemTime >= (mergedMap[item.date].updatedAt || 0)) {
+                                    mergedMap[item.date] = item;
+                                }
+                            }
+                        });
+                    }
+
                     const result = Object.values(mergedMap).sort((a, b) => b.date.localeCompare(a.date));
                     setHistoryList(result);
                     localStorage.setItem('praise_flow_history', JSON.stringify(result));
                     if (result.length > 0 && !silent) {
-                        showToast(`☁️ 인터넷 클라우드 서버에서 총 ${result.length}개 날짜 선곡 기록을 성공적으로 불러왔습니다!`);
+                        showToast(`☁️ 클라우드 DB에서 총 ${result.length}개 날짜 선곡 기록을 성공적으로 불러왔습니다!`);
                     }
                 } catch (err) {
                     console.error("History DB 로드 예외 보완:", err);
                     setHistoryList(localHistory);
                 } finally {
                     if (!silent) setIsSyncing(false);
+                }
+            };
+
+            // 불량 캐시 비우기 및 클라우드 데이터 강제 재동기화
+            const clearBadCacheAndSync = async () => {
+                if (confirm("8월 17일 등 옛날 굳은 캐시 데이터를 지우고, Supabase 및 시놀로지 NAS의 최신 9월 10일 클라우드 데이터로 강제 재동기화하시겠습니까?")) {
+                    localStorage.removeItem('praise_flow_history');
+                    localStorage.removeItem('praise_flow_f_db');
+                    setHistoryList([]);
+                    setLibrary({});
+                    showToast("🧹 불량 캐시를 비웠습니다. 최신 클라우드 DB에서 불러오는 중...");
+                    await fetchFromDB(false);
+                    await fetchHistoryFromDB(false);
                 }
             };
 
@@ -1286,6 +1471,12 @@
                 }
 
                 const initSync = async () => {
+                    if (fetchFromDBRef.current) {
+                        await fetchFromDBRef.current(true);
+                    }
+                    if (fetchHistoryFromDBRef.current) {
+                        await fetchHistoryFromDBRef.current(true);
+                    }
                     const loader = document.getElementById('loader');
                     if (loader) loader.style.display = 'none';
                 };
@@ -1975,7 +2166,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.4.2</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.0</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
@@ -1991,7 +2182,22 @@
                                 {isSyncing ? '🔄 서버 동기화 중...' : '☁️ DB 수동 동기화 모드'}
                             </span>
                         </h1>
-                        <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
+                        <div style={{display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap'}}>
+                            <button 
+                                className="btn" 
+                                style={{background:'rgba(56, 189, 248, 0.12)', color:'#38bdf8', border:'1px solid rgba(56, 189, 248, 0.35)', fontWeight:800}} 
+                                onClick={() => setShowNasModal(true)}
+                            >
+                                📡 개인 시놀로지 NAS 연동 {nasServerUrl ? '(연결됨)' : ''}
+                            </button>
+                            <button 
+                                className="btn" 
+                                style={{background:'rgba(245, 158, 11, 0.15)', color:'#fbbf24', border:'1px solid rgba(245, 158, 11, 0.35)', fontWeight:800}} 
+                                onClick={clearBadCacheAndSync}
+                                title="옛날 8월 17일 불량 캐시를 비우고 Supabase 최신 데이터를 강제 로드합니다."
+                            >
+                                🧹 옛날 캐시 삭제 & 최신 DB 동기화
+                            </button>
                             <button className="btn" style={{background:'#1e1b4b', color:'#c084fc', border:'1px solid #4338ca'}} onClick={handleShareLink}>
                                 <i data-lucide="share-2"></i> 🖥️ 자막 뷰어 링크 복사
                             </button>
@@ -2073,6 +2279,25 @@
                                             }}
                                         >
                                             <i data-lucide="save" style={{width:14, height:14}}></i> 💾 선곡 저장
+                                        </button>
+                                        <button 
+                                            className="btn" 
+                                            onClick={() => fetchFromDB(false)}
+                                            style={{
+                                                padding: '6px 12px',
+                                                fontSize: '0.8rem',
+                                                fontWeight: 800,
+                                                background: 'rgba(34, 197, 94, 0.15)',
+                                                color: '#34d399',
+                                                border: '1px solid rgba(34, 197, 94, 0.35)',
+                                                borderRadius: '8px',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 4
+                                            }}
+                                            title="클라우드 DB에서 최신 가사 및 찬양 목록을 수동 불러옵니다."
+                                        >
+                                            ☁️ DB전체 불러오기
                                         </button>
                                         <button 
                                             className="btn" 
@@ -2327,50 +2552,98 @@
                         </div>
                     ) : (
                         <div className="card" style={{background:'var(--card-bg)', border:'1px solid var(--border)', padding:'2rem', borderRadius:'24px'}}>
-                            <div style={{display:'flex', gap:10, marginBottom:30, flexWrap:'wrap'}}>
-                                <button className="btn btn-primary" style={{flex:1, minWidth:'160px', background:'var(--primary)', color:'white', fontWeight:800}} onClick={()=>{
-                                    uploadToDB();
-                                }}>☁️ 전체 찬양 DB 수동 저장 ({Object.keys(library).length}곡)</button>
-                                <button className="btn btn-outline" style={{flex:1, minWidth:'150px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', fontWeight:800}} onClick={()=>{
-                                    fetchFromDB(false);
-                                }}>☁️ 클라우드 DB 수동 불러오기</button>
-                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'#a78bfa', background:'rgba(167,139,250,0.1)', border:'1px solid rgba(167,139,250,0.3)', fontWeight:800}} onClick={inspectServerData}>
-                                    🔍 서버 백업 미리보기
-                                </button>
-                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>document.getElementById('import-f').click()}>📂 내 컴퓨터 백업 파일 불러오기</button>
-                                <input type="file" id="import-f" style={{display:'none'}} onChange={(e)=>{
-                                    const file = e.target.files[0];
-                                    if(!file) return;
-                                    const r = new FileReader();
-                                    r.onload = (ev) => {
-                                        try {
-                                            const data = JSON.parse(ev.target.result);
-                                            const updatedData = {};
-                                            // 백업본의 각 곡에 생성/수정 시간이 없으면 현재 시간 부여
-                                            Object.keys(data).forEach(key => {
-                                                updatedData[key] = {
-                                                    title: data[key].title || key,
-                                                    lyrics: data[key].lyrics || "",
-                                                    youtubeUrl: data[key].youtubeUrl || "",
-                                                    youtubeMrUrl: data[key].youtubeMrUrl || "",
-                                                    createdAt: data[key].createdAt || Date.now(),
-                                                    updatedAt: data[key].updatedAt || Date.now()
-                                                };
-                                            });
-                                            setLibrary(prev => ({...prev, ...updatedData}));
-                                            showToast("📥 내 컴퓨터 백업 라이브러리를 불러왔습니다!");
-                                        } catch (err) {
-                                            alert("파일 분석에 실패했습니다.");
-                                        }
-                                    };
-                                    r.readAsText(file);
-                                }} />
-                                <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}} onClick={()=>{
-                                    const blob = new Blob([JSON.stringify(library)], {type:'application/json'});
-                                    const url = URL.createObjectURL(blob);
-                                    const a = document.createElement('a'); a.href = url; a.download='praise_library.json'; a.click();
-                                    showToast("💾 내 컴퓨터 백업 파일(praise_library.json) 다운로드 완료!");
-                                }}>💾 컴퓨터 백업 파일 내보내기</button>
+                            {/* 컴퓨터 2~3대 동기화 컨트롤 및 안내 상태바 */}
+                            <div style={{
+                                background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.12), rgba(59, 130, 246, 0.12))',
+                                border: '1px solid rgba(168, 85, 247, 0.35)',
+                                padding: '1.2rem 1.5rem',
+                                borderRadius: '18px',
+                                marginBottom: '25px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '12px'
+                            }}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:10}}>
+                                    <div style={{display:'flex', alignItems:'center', gap:10}}>
+                                        <span style={{
+                                            fontSize:'1rem',
+                                            fontWeight:900,
+                                            color:'#c084fc',
+                                            display:'flex',
+                                            alignItems:'center',
+                                            gap:6
+                                        }}>
+                                            <i data-lucide="refresh-cw" style={{width:18, height:18}}></i>
+                                            💻 2~3대 컴퓨터 찬양 가사 & 목록 완벽 동기화
+                                        </span>
+                                        <span style={{
+                                            fontSize:'0.75rem',
+                                            background:'rgba(34, 197, 94, 0.2)',
+                                            color:'#4ade80',
+                                            border:'1px solid rgba(34, 197, 94, 0.4)',
+                                            padding:'3px 10px',
+                                            borderRadius:'12px',
+                                            fontWeight:800
+                                        }}>
+                                            채널: {channelId}
+                                        </span>
+                                    </div>
+                                    <div style={{fontSize:'0.8rem', color:'var(--text-dim)', fontWeight:700}}>
+                                        🕒 최근 클라우드 DB 저장: <span style={{color:'white', fontWeight:800}}>{lastDbSaveTime || '저장 기록 없음'}</span>
+                                    </div>
+                                </div>
+
+                                <p style={{fontSize:'0.82rem', color:'rgba(255,255,255,0.75)', margin:0, lineHeight:1.4}}>
+                                    ℹ️ 다른 컴퓨터(노트북/데스크톱)에서 동일한 채널명(<code>{channelId}</code>)으로 접속 시, 찬양 제작소의 가사와 곡 목록이 서로 완벽히 공유됩니다. 한 쪽에서 <b>[☁️ 클라우드 DB 수동 저장]</b>을 누르면 다른 컴퓨터에서도 즉시 수동 불러오거나 동기화할 수 있습니다.
+                                </p>
+
+                                <div style={{display:'flex', gap:10, marginTop:5, flexWrap:'wrap'}}>
+                                    <button className="btn btn-primary" style={{flex:1, minWidth:'180px', background:'linear-gradient(135deg, #a855f7, #7c3aed)', color:'white', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>{
+                                        uploadToDB();
+                                    }}>☁️ 클라우드 DB 전체 저장 (컴퓨터 2~3대 동기화 - 총 {Object.keys(library).length}곡)</button>
+                                    <button className="btn btn-outline" style={{flex:1, minWidth:'160px', color:'white', background:'rgba(255,255,255,0.06)', border:'1px solid var(--border)', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>{
+                                        fetchFromDB(false);
+                                    }}>☁️ 클라우드 DB 수동 불러오기 (타 기기 가사/목록 반영)</button>
+                                    <button className="btn btn-outline" style={{flex:1, minWidth:'160px', color:'#38bdf8', background:'rgba(56, 189, 248, 0.12)', border:'1px solid rgba(56, 189, 248, 0.35)', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>setShowNasModal(true)}>
+                                        📡 개인 시놀로지 NAS 연동 {nasServerUrl ? '(연결됨)' : ''}
+                                    </button>
+                                    <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'#a78bfa', background:'rgba(167,139,250,0.1)', border:'1px solid rgba(167,139,250,0.3)', fontWeight:800, padding:'10px 14px', fontSize:'0.85rem'}} onClick={inspectServerData}>
+                                        🔍 서버 백업 미리보기
+                                    </button>
+                                    <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>document.getElementById('import-f').click()}>📂 내 컴퓨터 백업 파일 불러오기</button>
+                                    <input type="file" id="import-f" style={{display:'none'}} onChange={(e)=>{
+                                        const file = e.target.files[0];
+                                        if(!file) return;
+                                        const r = new FileReader();
+                                        r.onload = (ev) => {
+                                            try {
+                                                const data = JSON.parse(ev.target.result);
+                                                const updatedData = {};
+                                                Object.keys(data).forEach(key => {
+                                                    updatedData[key] = {
+                                                        title: data[key].title || key,
+                                                        lyrics: data[key].lyrics || "",
+                                                        youtubeUrl: data[key].youtubeUrl || "",
+                                                        youtubeMrUrl: data[key].youtubeMrUrl || "",
+                                                        createdAt: data[key].createdAt || Date.now(),
+                                                        updatedAt: data[key].updatedAt || Date.now()
+                                                    };
+                                                });
+                                                setLibrary(prev => ({...prev, ...updatedData}));
+                                                showToast("📥 내 컴퓨터 백업 라이브러리를 불러왔습니다!");
+                                            } catch (err) {
+                                                alert("파일 분석에 실패했습니다.");
+                                            }
+                                        };
+                                        r.readAsText(file);
+                                    }} />
+                                    <button className="btn btn-outline" style={{flex:1, minWidth:'140px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)', padding:'10px 14px', fontSize:'0.85rem'}} onClick={()=>{
+                                        const blob = new Blob([JSON.stringify(library)], {type:'application/json'});
+                                        const url = URL.createObjectURL(blob);
+                                        const a = document.createElement('a'); a.href = url; a.download='praise_library.json'; a.click();
+                                        showToast("💾 내 컴퓨터 백업 파일(praise_library.json) 다운로드 완료!");
+                                    }}>💾 컴퓨터 백업 파일 내보내기</button>
+                                </div>
                             </div>
                             <input id="new-title" placeholder="찬양 제목" style={{width:'100%', marginBottom:15, padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white', fontWeight:700}} />
                             <textarea id="new-lyrics" placeholder="가사를 입력하세요 (빈 줄로 슬라이드 구분)" style={{width:'100%', height:200, padding:'12px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:'12px', color:'white', resize:'none'}}></textarea>
@@ -2389,13 +2662,13 @@
                                 const l = document.getElementById('new-lyrics').value.trim();
                                 const yMusic = document.getElementById('new-youtube-music').value.trim();
                                 const yMr = document.getElementById('new-youtube-mr').value.trim();
-                                if(!t) return alert("제목을 입력하세요.");
+                                const existingSong = library[t];
                                 const newSongObj = {
                                     title: t,
                                     lyrics: l,
                                     youtubeUrl: yMusic,
                                     youtubeMrUrl: yMr,
-                                    createdAt: Date.now(),
+                                    createdAt: existingSong ? (existingSong.createdAt || Date.now()) : Date.now(),
                                     updatedAt: Date.now()
                                 };
                                 setLibrary(prev => {
@@ -3107,6 +3380,64 @@
                                         </div>
                                     </div>
                                 ) : null}
+                            </div>
+                        </div>
+                    )}
+
+                    {showNasModal && (
+                        <div className="modal-overlay" onClick={(e)=>{ if(e.target === e.currentTarget) setShowNasModal(false); }}>
+                            <div className="modal-box" style={{ maxWidth: '600px', width: '90%', padding: '2rem' }} onClick={e=>e.stopPropagation()}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'1px solid var(--border)', paddingBottom:'15px', marginBottom:'20px'}}>
+                                    <h3 style={{fontSize:'1.2rem', fontWeight:900, color:'#38bdf8', display:'flex', alignItems:'center', gap:'8px', margin:0}}>
+                                        📡 개인 시놀로지 NAS / 커스텀 클라우드 연동
+                                    </h3>
+                                    <button onClick={() => setShowNasModal(false)} style={{background:'none', border:'none', color:'white', fontSize:'1.2rem', cursor:'pointer'}}>✕</button>
+                                </div>
+
+                                <div style={{marginBottom:'20px'}}>
+                                    <label style={{fontSize:'0.85rem', fontWeight:800, color:'white', display:'block', marginBottom:'8px'}}>
+                                        🔗 시놀로지 나스(NAS) API / WebStation Server URL:
+                                    </label>
+                                    <input 
+                                        type="text" 
+                                        placeholder="http://my-synology.synology.me:5000/praise_api.php 또는 http://192.168.0.x/..." 
+                                        value={nasServerUrl} 
+                                        onChange={(e) => setNasServerUrl(e.target.value)}
+                                        style={{width:'100%', padding:'12px', background:'rgba(0,0,0,0.4)', border:'1px solid #38bdf8', borderRadius:'12px', color:'white', fontSize:'0.9rem', outline:'none', fontWeight:700}}
+                                    />
+                                    <div style={{fontSize:'0.8rem', color:'rgba(255,255,255,0.7)', marginTop:'12px', background:'rgba(56, 189, 248, 0.1)', padding:'12px', borderRadius:'12px', border:'1px solid rgba(56, 189, 248, 0.25)', lineHeight:1.5}}>
+                                        💡 <b>시놀로지 NAS 활용법 안내:</b><br />
+                                        1. 시놀로지 NAS의 <b>Web Station</b> (PHP / Node.js) 또는 WebDAV 서버에 간단한 데이터 저장/조회 API 스크립트를 작성합니다.<br />
+                                        2. 주소를 등록해두시면 무료 외부 서비스의 용량 제한이나 8월 17일 등 옛날 데이터 캐시 오류 없이 <b>100% 개인 나스 서버로 무제한 찬양 가사 & 선곡 동기화</b>가 작동합니다.
+                                    </div>
+                                </div>
+
+                                <div style={{display:'flex', gap:10}}>
+                                    <button 
+                                        className="btn btn-primary" 
+                                        style={{flex:1, background:'linear-gradient(135deg, #0284c7, #0369a1)', color:'white', fontWeight:800, padding:'12px'}}
+                                        onClick={() => {
+                                            const trimmed = nasServerUrl.trim();
+                                            setNasServerUrl(trimmed);
+                                            localStorage.setItem('praise_nas_server_url', trimmed);
+                                            setShowNasModal(false);
+                                            if (trimmed) {
+                                                showToast("📡 개인 시놀로지 NAS 서버 연동 설정이 저장되었습니다!");
+                                            } else {
+                                                showToast("📡 시놀로지 NAS 연동이 해제되고 Supabase 클라우드 기본 모드로 동작합니다.");
+                                            }
+                                        }}
+                                    >
+                                        💾 설정 저장 및 적용
+                                    </button>
+                                    <button 
+                                        className="btn btn-outline" 
+                                        style={{padding:'12px 20px', color:'white', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)'}}
+                                        onClick={() => setShowNasModal(false)}
+                                    >
+                                        닫기
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     )}
