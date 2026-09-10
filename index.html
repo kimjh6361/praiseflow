@@ -449,11 +449,14 @@
                                     curLocal = JSON.parse(localStorage.getItem('praise_flow_f_db') || '{}');
                                 } catch(e) {}
 
-                                const merged = mergeSongLibraries(curLocal, packet.payload);
-                                if (JSON.stringify(curLocal) !== JSON.stringify(merged)) {
-                                    setLibrary(merged);
-                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
-                                    showToast(`⚡ 연결된 클라우드 기기로부터 최신 찬양 보관함(${Object.keys(merged).length}곡)이 동기화되었습니다!`);
+                                const incomingLib = packet.payload;
+                                if (JSON.stringify(curLocal) !== JSON.stringify(incomingLib)) {
+                                    setLibrary(incomingLib);
+                                    localStorage.setItem('praise_flow_f_db', JSON.stringify(incomingLib));
+                                    const curTimeStr = getFormattedDateTime();
+                                    setLastDbSaveTime(curTimeStr);
+                                    localStorage.setItem('praise_last_db_save_time', curTimeStr);
+                                    showToast(`⚡ 연결된 클라우드 기기로부터 최신 찬양 보관함(${Object.keys(incomingLib).length}곡)이 동기화되었습니다!`);
                                 }
                             }
 
@@ -821,8 +824,7 @@
 
                 try {
                     if (!silent) setIsSyncing(true);
-                    let merged = { ...localLib };
-                    let cloudFetched = false;
+                    let targetCloudLib = null;
 
                     // 0. MQTT 클라우드 브로커 채널 재구독 및 동기화 시그널 전송
                     if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
@@ -834,37 +836,37 @@
                         }
                     }
 
-                    // 0.5차: Vercel Serverless Sync API 클라우드 DB 수신 (100% 실시간 연동)
+                    // 0.5차: Vercel Serverless Sync API 클라우드 마스터 DB 수신 (추가/수정/삭제 100% 동기화)
                     try {
                         const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId + '&t=' + Date.now();
                         const apiRes = await fetch(syncApiUrl);
                         if (apiRes.ok) {
                             const apiData = await apiRes.json();
                             if (apiData && apiData.library && typeof apiData.library === 'object' && Object.keys(apiData.library).length > 0) {
-                                merged = mergeSongLibraries(merged, apiData.library);
-                                cloudFetched = true;
+                                targetCloudLib = apiData.library;
                             }
                         }
                     } catch (apiErr) {
                         console.warn("Vercel Sync API fetch warn:", apiErr);
                     }
 
-                    // 1차: GitHub Raw Master CDN 클라우드 데이터베이스 수신 (100% 안정적, 0.1초 소요)
-                    try {
-                        const ghRes = await fetch(`https://raw.githubusercontent.com/kimjh6361/praiseflow/main/praise_master_db.json?t=${Date.now()}`);
-                        if (ghRes.ok) {
-                            const ghData = await ghRes.json();
-                            if (ghData && typeof ghData === 'object' && Object.keys(ghData).length > 0) {
-                                merged = mergeSongLibraries(merged, ghData);
-                                cloudFetched = true;
+                    // 1차: GitHub Raw Master CDN 클라우드 데이터베이스 수신
+                    if (!targetCloudLib) {
+                        try {
+                            const ghRes = await fetch(`https://raw.githubusercontent.com/kimjh6361/praiseflow/main/praise_master_db.json?t=${Date.now()}`);
+                            if (ghRes.ok) {
+                                const ghData = await ghRes.json();
+                                if (ghData && typeof ghData === 'object' && Object.keys(ghData).length > 0) {
+                                    targetCloudLib = ghData;
+                                }
                             }
+                        } catch (ghErr) {
+                            console.warn("GitHub Raw DB fetch warn:", ghErr);
                         }
-                    } catch (ghErr) {
-                        console.warn("GitHub Raw DB fetch warn:", ghErr);
                     }
 
-                    // 2차: Supabase 클라우드 DB에서 찬양 보관함(GLOBAL_MASTER_LIBRARY) 조회
-                    if (supabase) {
+                    // 2차: Supabase 클라우드 DB 조회
+                    if (!targetCloudLib && supabase) {
                         try {
                             const { data: supaLibData, error: supaErr } = await supabase
                                 .from('praise_history')
@@ -872,26 +874,23 @@
                                 .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
                                 .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
 
-                            if (!supaErr && supaLibData && supaLibData.length > 0) {
-                                supaLibData.forEach(row => {
-                                    if (row.slots_data && typeof row.slots_data === 'object' && !Array.isArray(row.slots_data)) {
-                                        merged = mergeSongLibraries(merged, row.slots_data);
-                                        cloudFetched = true;
-                                    }
-                                });
+                            if (!supaErr && supaLibData && supaLibData.length > 0 && supaLibData[0].slots_data) {
+                                targetCloudLib = supaLibData[0].slots_data;
                             }
                         } catch (supaErr) {
                             console.warn("Supabase library fetch warn:", supaErr);
                         }
                     }
 
-                    if (cloudFetched || Object.keys(merged).length > 0) {
-                        setLibrary(merged);
-                        localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
+                    const finalLib = targetCloudLib || localLib;
+
+                    if (Object.keys(finalLib).length > 0) {
+                        setLibrary(finalLib);
+                        localStorage.setItem('praise_flow_f_db', JSON.stringify(finalLib));
                         const curTimeStr = getFormattedDateTime();
                         setLastDbSaveTime(curTimeStr);
                         localStorage.setItem('praise_last_db_save_time', curTimeStr);
-                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(merged).length}곡)을 성공적으로 불러왔습니다!`);
+                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(finalLib).length}곡)을 동기화했습니다!`);
                         return;
                     }
 
@@ -2159,7 +2158,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.8</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.9</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
