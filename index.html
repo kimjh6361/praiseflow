@@ -205,7 +205,7 @@
 
         const saveCloudData = async (url, name, payloadKey, payloadData) => {
             try {
-                await fetch(url, {
+                const res = await fetch(url, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -213,15 +213,25 @@
                         data: { [payloadKey]: payloadData, updatedAt: Date.now() }
                     })
                 });
+                if (res.ok) {
+                    return true;
+                } else {
+                    console.warn(`Cloud REST save status: ${res.status}`);
+                    return false;
+                }
             } catch(e) {
                 console.warn("Cloud REST save fail:", e);
+                return false;
             }
         };
 
         const fetchCloudData = async (url, payloadKey) => {
             try {
                 const res = await fetch(url);
-                if (!res.ok) return null;
+                if (!res.ok) {
+                    console.warn(`Cloud REST fetch status: ${res.status}`);
+                    return null;
+                }
                 const json = await res.json();
                 if (json && json.data && json.data[payloadKey]) {
                     return json.data[payloadKey];
@@ -812,20 +822,25 @@
                 try {
                     if (!silent) setIsSyncing(true);
                     let merged = { ...localLib };
+                    let cloudFetched = false;
+
+                    // 0. 현재 온라인 연결된 다른 컴퓨터가 있다면 가사 보관함 직접 P2P 전달 요청
+                    sendMqttSignal('REQUEST_LIBRARY_SYNC', { timestamp: Date.now() });
 
                     // 1차: Supabase 클라우드 DB에서 찬양 보관함(GLOBAL_MASTER_LIBRARY) 조회
                     if (supabase) {
                         try {
-                            const { data: supaLibData } = await supabase
+                            const { data: supaLibData, error: supaErr } = await supabase
                                 .from('praise_history')
                                 .select('slots_data')
                                 .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
                                 .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
 
-                            if (supaLibData && supaLibData.length > 0) {
+                            if (!supaErr && supaLibData && supaLibData.length > 0) {
                                 supaLibData.forEach(row => {
                                     if (row.slots_data && typeof row.slots_data === 'object' && !Array.isArray(row.slots_data)) {
                                         merged = mergeSongLibraries(merged, row.slots_data);
+                                        cloudFetched = true;
                                     }
                                 });
                             }
@@ -838,11 +853,15 @@
                     const cloudLib = await fetchCloudData(CLOUD_LIBRARY_URL, 'library');
                     if (cloudLib && typeof cloudLib === 'object' && Object.keys(cloudLib).length > 0) {
                         merged = mergeSongLibraries(merged, cloudLib);
+                        cloudFetched = true;
                     }
 
-                    if (Object.keys(merged).length > 0) {
+                    if (cloudFetched || Object.keys(merged).length > 0) {
                         setLibrary(merged);
                         localStorage.setItem('praise_flow_f_db', JSON.stringify(merged));
+                        const curTimeStr = getFormattedDateTime();
+                        setLastDbSaveTime(curTimeStr);
+                        localStorage.setItem('praise_last_db_save_time', curTimeStr);
                         if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(merged).length}곡)을 성공적으로 불러왔습니다!`);
                         return;
                     }
@@ -850,11 +869,13 @@
                     if (Object.keys(localLib).length > 0) {
                         setLibrary(localLib);
                     }
+                    if (!silent) showToast("⚠️ 클라우드 DB에서 최신 데이터를 읽어오지 못했습니다. 로컬 보관함을 표시합니다.");
                 } catch (err) {
                     console.error("DB 로드 실패 (Fallback 작동):", err);
                     if (Object.keys(localLib).length > 0) {
                         setLibrary(localLib);
                     }
+                    if (!silent) showToast("⚠️ 클라우드 DB 로드 실패: 로컬 보관함을 표시합니다.");
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
@@ -875,29 +896,34 @@
                 try {
                     if (!silent) setIsSyncing(true);
 
+                    let supaSaved = false;
                     // 2. Supabase 클라우드 DB에 찬양 보관함 전체 마스터 기록 (GLOBAL_MASTER_LIBRARY)
                     if (supabase) {
                         const targetChannels = Array.from(new Set([channelId, 'praise_main_channel', 'default']));
                         for (const chId of targetChannels) {
                             try {
-                                const { data: existLib } = await supabase
+                                const { data: existLib, error: selErr } = await supabase
                                     .from('praise_history')
                                     .select('id')
                                     .eq('channel_id', chId)
                                     .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
 
-                                if (existLib && existLib.length > 0) {
-                                    await supabase.from('praise_history').update({
-                                        slots_data: targetLib,
-                                        updated_at: new Date().toISOString()
-                                    }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
-                                } else {
-                                    await supabase.from('praise_history').insert({
-                                        channel_id: chId,
-                                        event_date: 'GLOBAL_MASTER_LIBRARY',
-                                        slots_data: targetLib,
-                                        updated_at: new Date().toISOString()
-                                    });
+                                if (!selErr) {
+                                    if (existLib && existLib.length > 0) {
+                                        const { error: updErr } = await supabase.from('praise_history').update({
+                                            slots_data: targetLib,
+                                            updated_at: new Date().toISOString()
+                                        }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                        if (!updErr) supaSaved = true;
+                                    } else {
+                                        const { error: insErr } = await supabase.from('praise_history').insert({
+                                            channel_id: chId,
+                                            event_date: 'GLOBAL_MASTER_LIBRARY',
+                                            slots_data: targetLib,
+                                            updated_at: new Date().toISOString()
+                                        });
+                                        if (!insErr) supaSaved = true;
+                                    }
                                 }
                             } catch (supaSaveErr) {
                                 console.warn("Supabase library upload warn:", supaSaveErr);
@@ -905,20 +931,24 @@
                         }
                     }
 
-                    // 3. REST 클라우드 DB 보완 저장
-                    await saveCloudData(CLOUD_LIBRARY_URL, 'praiseflow_library_master', 'library', targetLib);
+                    // 3. REST 클라우드 DB 저장 시도
+                    const restSaved = await saveCloudData(CLOUD_LIBRARY_URL, 'praiseflow_library_master', 'library', targetLib);
 
                     // 4. MQTT 연결된 전 기기에 실시간 P2P 전송
                     sendMqttSignal('SYNC_FULL_LIBRARY_PAYLOAD', targetLib);
 
-                    const saveTimeStr = getFormattedDateTime();
-                    setLastDbSaveTime(saveTimeStr);
-                    localStorage.setItem('praise_last_db_save_time', saveTimeStr);
-
-                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 안전하게 업로드되었습니다! (저장일시: ${saveTimeStr})`);
+                    if (supaSaved || restSaved) {
+                        const saveTimeStr = getFormattedDateTime();
+                        setLastDbSaveTime(saveTimeStr);
+                        localStorage.setItem('praise_last_db_save_time', saveTimeStr);
+                        if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 안전하게 업로드되었습니다! (저장일시: ${saveTimeStr})`);
+                    } else {
+                        // 서버 저장 실패 시 타임스탬프를 갱신하지 않고 사용자에게 정확한 오류 안내
+                        if (!silent) alert(`⚠️ 클라우드 DB 저장 실패: 외부 클라우드 서버 저장소에 연결할 수 없거나 요청 제한 오류가 발생했습니다.\n\n현재 찬양 보관함(${songTitles.length}곡)은 이 컴퓨터 로컬 저장소에 안전하게 보존되었습니다.`);
+                    }
                 } catch (err) {
                     console.warn("DB 업로드 보완:", err);
-                    if (!silent) showToast(`💾 로컬 저장소에 찬양 보관함(${songTitles.length}곡)이 보존되었습니다.`);
+                    if (!silent) alert(`⚠️ DB 업로드 실패 (${err.message}). 로컬 저장소에 보존되었습니다.`);
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
@@ -2092,7 +2122,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.1</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.2</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 
