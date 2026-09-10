@@ -815,7 +815,7 @@
                 localStorage.setItem('praise_db_sync_enabled', JSON.stringify(dbSyncEnabled));
             }, [dbSyncEnabled]);
 
-            // DB에서 찬양 목록 가져오기 (Vercel Serverless Sync + GitHub Master Raw CDN + Supabase + MQTT 클라우드)
+            // DB에서 전체 데이터 (찬양 보관함 + 예배순서 큐시트 + 히스토리) 한꺼번에 불러오기
             const fetchFromDB = async (silent = false) => {
                 let localLib = {};
                 try {
@@ -825,18 +825,22 @@
                 try {
                     if (!silent) setIsSyncing(true);
                     let targetCloudLib = null;
+                    let targetCloudSlots = null;
+                    let targetCloudHistory = null;
 
                     // 0. MQTT 클라우드 브로커 채널 재구독 및 동기화 시그널 전송
                     if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
                         try {
                             mqttClientRef.current.subscribe(`praiseflow/sync/${channelId}`);
                             sendMqttSignal('REQUEST_LIBRARY_SYNC');
+                            sendMqttSignal('REQUEST_SLOTS_SYNC');
+                            sendMqttSignal('REQUEST_HISTORY_SYNC');
                         } catch(mErr) {
                             console.warn("MQTT fetch warn:", mErr);
                         }
                     }
 
-                    // 0.5차: Vercel Serverless Sync API 클라우드 마스터 DB 수신 (추가/수정/삭제 100% 동기화)
+                    // 0.5차: Vercel Serverless Sync API 클라우드 통합 마스터 DB 수신 (Library + Slots + History)
                     try {
                         const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId + '&t=' + Date.now();
                         const apiRes = await fetch(syncApiUrl);
@@ -844,6 +848,12 @@
                             const apiData = await apiRes.json();
                             if (apiData && apiData.library && typeof apiData.library === 'object' && Object.keys(apiData.library).length > 0) {
                                 targetCloudLib = apiData.library;
+                            }
+                            if (apiData && Array.isArray(apiData.slots) && apiData.slots.some(Boolean)) {
+                                targetCloudSlots = apiData.slots;
+                            }
+                            if (apiData && Array.isArray(apiData.history) && apiData.history.length > 0) {
+                                targetCloudHistory = apiData.history;
                             }
                         }
                     } catch (apiErr) {
@@ -865,128 +875,162 @@
                         }
                     }
 
-                    // 2차: Supabase 클라우드 DB 조회
-                    if (!targetCloudLib && supabase) {
+                    // 2차: Supabase 클라우드 DB 조회 (Library + Slots + History)
+                    if (supabase) {
                         try {
-                            const { data: supaLibData, error: supaErr } = await supabase
-                                .from('praise_history')
-                                .select('slots_data')
-                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
-                                .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
-
-                            if (!supaErr && supaLibData && supaLibData.length > 0 && supaLibData[0].slots_data) {
-                                targetCloudLib = supaLibData[0].slots_data;
+                            if (!targetCloudLib) {
+                                const { data: supaLibData } = await supabase
+                                    .from('praise_history')
+                                    .select('slots_data')
+                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                    .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                if (supaLibData && supaLibData.length > 0 && supaLibData[0].slots_data) {
+                                    targetCloudLib = supaLibData[0].slots_data;
+                                }
+                            }
+                            if (!targetCloudSlots) {
+                                const { data: supaSlotsData } = await supabase
+                                    .from('praise_history')
+                                    .select('slots_data')
+                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                    .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+                                if (supaSlotsData && supaSlotsData.length > 0 && Array.isArray(supaSlotsData[0].slots_data)) {
+                                    targetCloudSlots = supaSlotsData[0].slots_data;
+                                }
+                            }
+                            if (!targetCloudHistory) {
+                                const { data: supaHistData } = await supabase
+                                    .from('praise_history')
+                                    .select('slots_data')
+                                    .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                    .eq('event_date', 'GLOBAL_MASTER_HISTORY');
+                                if (supaHistData && supaHistData.length > 0 && Array.isArray(supaHistData[0].slots_data)) {
+                                    targetCloudHistory = supaHistData[0].slots_data;
+                                }
                             }
                         } catch (supaErr) {
-                            console.warn("Supabase library fetch warn:", supaErr);
+                            console.warn("Supabase fetch warn:", supaErr);
                         }
                     }
 
-                    const finalLib = targetCloudLib || localLib;
+                    // REST API 보완 큐시트 조회
+                    if (!targetCloudSlots) {
+                        try {
+                            targetCloudSlots = await fetchCloudData(CLOUD_SLOTS_URL, 'slots');
+                        } catch(rErr) {}
+                    }
 
+                    // 1) 찬양 보관함 데이터 적용
+                    const finalLib = targetCloudLib || localLib;
                     if (Object.keys(finalLib).length > 0) {
                         setLibrary(finalLib);
                         localStorage.setItem('praise_flow_f_db', JSON.stringify(finalLib));
-                        const curTimeStr = getFormattedDateTime();
-                        setLastDbSaveTime(curTimeStr);
-                        localStorage.setItem('praise_last_db_save_time', curTimeStr);
-                        try {
-                            await fetchSlotsFromDB(true);
-                        } catch(sErr) {}
-                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(finalLib).length}곡)과 예배 순서를 동기화했습니다!`);
-                        return;
                     }
 
-                    if (Object.keys(localLib).length > 0) {
-                        setLibrary(localLib);
+                    // 2) 예배 순서 큐시트 데이터 적용
+                    if (Array.isArray(targetCloudSlots) && targetCloudSlots.some(Boolean)) {
+                        setSlots(targetCloudSlots);
+                        localStorage.setItem('praise_flow_slots', JSON.stringify(targetCloudSlots));
                     }
-                    if (!silent) showToast("⚠️ 클라우드 DB에서 최신 데이터를 읽어오지 못했습니다. 로컬 보관함을 표시합니다.");
+
+                    // 3) 선곡 아카이브 히스토리 데이터 적용
+                    if (Array.isArray(targetCloudHistory) && targetCloudHistory.length > 0) {
+                        setHistoryList(targetCloudHistory);
+                        localStorage.setItem('praise_flow_history', JSON.stringify(targetCloudHistory));
+                    }
+
+                    const curTimeStr = getFormattedDateTime();
+                    setLastDbSaveTime(curTimeStr);
+                    localStorage.setItem('praise_last_db_save_time', curTimeStr);
+
+                    if (!silent) {
+                        const libCount = Object.keys(finalLib).length;
+                        const slotCount = Array.isArray(targetCloudSlots) ? targetCloudSlots.filter(Boolean).length : slots.filter(Boolean).length;
+                        showToast(`☁️ 클라우드 DB 통합 동기화 완료! (찬양보관함 ${libCount}곡 + 예배순서 ${slotCount}곡 반영)`);
+                    }
                 } catch (err) {
-                    console.error("DB 로드 실패 (Fallback 작동):", err);
-                    if (Object.keys(localLib).length > 0) {
-                        setLibrary(localLib);
-                    }
+                    console.error("DB 통합 로드 실패:", err);
                     if (!silent) showToast("⚠️ 클라우드 DB 로드 실패: 로컬 보관함을 표시합니다.");
                 } finally {
                     if (!silent) setIsSyncing(false);
                 }
             };
 
-            // DB에 전체 보관함 업로드하기 (Vercel Serverless + MQTT Retained 클라우드 DB + Supabase + REST DB + P2P)
+            // DB에 전체 데이터 (찬양 보관함 + 예배순서 큐시트 + 히스토리) 한꺼번에 저장하기
             const uploadToDB = async (customLib = null, silent = false) => {
                 const targetLib = customLib || library;
+                const targetSlots = slots || [];
+                let localHistory = [];
+                try {
+                    localHistory = JSON.parse(localStorage.getItem('praise_flow_history') || '[]')
+                        .filter(h => h && h.date && h.date !== 'GLOBAL_MASTER_LIBRARY' && h.date !== 'GLOBAL_MASTER_HISTORY' && h.date !== 'CURRENT_SLOTS_SNAPSHOT');
+                } catch(e) {}
+
                 const songTitles = Object.keys(targetLib);
-                if (songTitles.length === 0) {
-                    if (!silent) alert("업로드할 곡이 없습니다.");
-                    return;
-                }
 
                 // 1. 로컬 저장소 안전 기록
                 localStorage.setItem('praise_flow_f_db', JSON.stringify(targetLib));
+                localStorage.setItem('praise_flow_slots', JSON.stringify(targetSlots));
 
                 try {
                     if (!silent) setIsSyncing(true);
 
-                    // 1.5. Vercel Serverless Sync API 저장 시도 (전세계 100% 무제한 실시간 저장)
+                    // 1.5. Vercel Serverless Sync API 통합 저장 (Library + Slots + History)
                     try {
                         const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId;
                         await fetch(syncApiUrl, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ library: targetLib })
+                            body: JSON.stringify({
+                                library: targetLib,
+                                slots: targetSlots,
+                                history: localHistory
+                            })
                         });
                     } catch (apiErr) {
                         console.warn("Vercel Sync API upload warn:", apiErr);
                     }
 
-                    // 2. MQTT 클라우드 브로커에 림(Retained) 보관함 저장 & 실시간 P2P 전송
+                    // 2. MQTT 클라우드 브로커에 림(Retained) 방송 & 실시간 전송
                     sendMqttSignal('SYNC_FULL_LIBRARY_PAYLOAD', targetLib, true);
+                    sendMqttSignal('SYNC_FULL_SLOTS_PAYLOAD', targetSlots, true);
+                    sendMqttSignal('SYNC_FULL_HISTORY_PAYLOAD', localHistory, true);
 
-                    // 3. Supabase 클라우드 DB에 찬양 보관함 기록 시도
+                    // 3. Supabase 클라우드 DB에 통합 저장
                     if (supabase) {
                         const targetChannels = Array.from(new Set([channelId, 'praise_main_channel', 'default']));
                         for (const chId of targetChannels) {
                             try {
-                                const { data: existLib, error: selErr } = await supabase
-                                    .from('praise_history')
-                                    .select('id')
-                                    .eq('channel_id', chId)
-                                    .eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                // Library 저장
+                                const { data: existLib } = await supabase.from('praise_history').select('id').eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                if (existLib && existLib.length > 0) {
+                                    await supabase.from('praise_history').update({ slots_data: targetLib, updated_at: new Date().toISOString() }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
+                                } else {
+                                    await supabase.from('praise_history').insert({ channel_id: chId, event_date: 'GLOBAL_MASTER_LIBRARY', slots_data: targetLib, updated_at: new Date().toISOString() });
+                                }
 
-                                if (!selErr) {
-                                    if (existLib && existLib.length > 0) {
-                                        await supabase.from('praise_history').update({
-                                            slots_data: targetLib,
-                                            updated_at: new Date().toISOString()
-                                        }).eq('channel_id', chId).eq('event_date', 'GLOBAL_MASTER_LIBRARY');
-                                    } else {
-                                        await supabase.from('praise_history').insert({
-                                            channel_id: chId,
-                                            event_date: 'GLOBAL_MASTER_LIBRARY',
-                                            slots_data: targetLib,
-                                            updated_at: new Date().toISOString()
-                                        });
-                                    }
+                                // Slots 저장
+                                const { data: existSlots } = await supabase.from('praise_history').select('id').eq('channel_id', chId).eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+                                if (existSlots && existSlots.length > 0) {
+                                    await supabase.from('praise_history').update({ slots_data: targetSlots, updated_at: new Date().toISOString() }).eq('channel_id', chId).eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+                                } else {
+                                    await supabase.from('praise_history').insert({ channel_id: chId, event_date: 'CURRENT_SLOTS_SNAPSHOT', slots_data: targetSlots, updated_at: new Date().toISOString() });
                                 }
                             } catch (supaSaveErr) {
-                                console.warn("Supabase library upload warn:", supaSaveErr);
+                                console.warn("Supabase upload warn:", supaSaveErr);
                             }
                         }
                     }
 
-                    // 4. REST 클라우드 DB 보완 저장 시도
-                    await saveCloudData(CLOUD_LIBRARY_URL, 'praiseflow_library_master', 'library', targetLib);
-
-                    // 5. 예배 순서 큐시트(slots) 클라우드 동기화 추가 저장
-                    try {
-                        await saveSlotsToDB(slots);
-                    } catch (slotsErr) {}
+                    // 4. REST 클라우드 DB 보완 저장
+                    saveCloudData(CLOUD_LIBRARY_URL, 'praiseflow_library_master', 'library', targetLib);
+                    saveCloudData(CLOUD_SLOTS_URL, 'praiseflow_slots_master', 'slots', targetSlots);
 
                     const saveTimeStr = getFormattedDateTime();
                     setLastDbSaveTime(saveTimeStr);
                     localStorage.setItem('praise_last_db_save_time', saveTimeStr);
 
-                    if (!silent) showToast(`☁️ 찬양 보관함 총 ${songTitles.length}곡이 클라우드 서버에 성공적으로 업로드되었습니다! (저장일시: ${saveTimeStr})`);
+                    if (!silent) showToast(`☁️ 찬양 보관함(${songTitles.length}곡) + 예배 순서가 클라우드 DB에 하나로 통합 저장되었습니다! (${saveTimeStr})`);
                 } catch (err) {
                     console.warn("DB 업로드 보완:", err);
                     if (!silent) alert(`⚠️ DB 업로드 실패 (${err.message}). 로컬 저장소에 보존되었습니다.`);
@@ -2258,7 +2302,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.0</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.1</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 

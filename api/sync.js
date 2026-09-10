@@ -22,7 +22,7 @@ export default async function handler(req, res) {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
       if (body && typeof body === 'object') {
         if (!memoryStore[channel]) {
-          memoryStore[channel] = { library: {}, slots: [], updatedAt: Date.now() };
+          memoryStore[channel] = { library: {}, slots: [], history: [], updatedAt: Date.now() };
         }
         if (body.library !== undefined) {
           memoryStore[channel].library = body.library;
@@ -30,12 +30,16 @@ export default async function handler(req, res) {
         if (body.slots !== undefined) {
           memoryStore[channel].slots = body.slots;
         }
+        if (body.history !== undefined) {
+          memoryStore[channel].history = body.history;
+        }
         memoryStore[channel].updatedAt = Date.now();
         return res.status(200).json({
           success: true,
           channel,
           libraryCount: Object.keys(memoryStore[channel].library || {}).length,
-          slotsCount: (memoryStore[channel].slots || []).filter(Boolean).length
+          slotsCount: (memoryStore[channel].slots || []).filter(Boolean).length,
+          historyCount: (memoryStore[channel].history || []).length
         });
       }
       return res.status(400).json({ success: false, error: 'Invalid payload' });
@@ -49,7 +53,7 @@ export default async function handler(req, res) {
     if (stored) {
       return res.status(200).json(stored);
     }
-    return res.status(200).json({ library: {}, slots: [], updatedAt: 0 });
+    return res.status(200).json({ library: {}, slots: [], history: [], updatedAt: 0 });
   }
 
   return res.status(405).end();
