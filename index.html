@@ -890,7 +890,10 @@
                         const curTimeStr = getFormattedDateTime();
                         setLastDbSaveTime(curTimeStr);
                         localStorage.setItem('praise_last_db_save_time', curTimeStr);
-                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(finalLib).length}곡)을 동기화했습니다!`);
+                        try {
+                            await fetchSlotsFromDB(true);
+                        } catch(sErr) {}
+                        if (!silent) showToast(`☁️ 클라우드 DB에서 최신 가사 & 곡 목록(${Object.keys(finalLib).length}곡)과 예배 순서를 동기화했습니다!`);
                         return;
                     }
 
@@ -974,6 +977,11 @@
                     // 4. REST 클라우드 DB 보완 저장 시도
                     await saveCloudData(CLOUD_LIBRARY_URL, 'praiseflow_library_master', 'library', targetLib);
 
+                    // 5. 예배 순서 큐시트(slots) 클라우드 동기화 추가 저장
+                    try {
+                        await saveSlotsToDB(slots);
+                    } catch (slotsErr) {}
+
                     const saveTimeStr = getFormattedDateTime();
                     setLastDbSaveTime(saveTimeStr);
                     localStorage.setItem('praise_last_db_save_time', saveTimeStr);
@@ -987,16 +995,64 @@
                 }
             };
 
-            // DB에서 큐시트(slots) 가져오기
+            // DB에서 큐시트(slots) 가져오기 (Vercel Serverless Sync + Supabase + REST + MQTT)
             const fetchSlotsFromDB = async (silent = false) => {
                 try {
                     if (!silent) setIsSyncing(true);
-                    const cloudSlots = await fetchCloudData(CLOUD_SLOTS_URL, 'slots');
-                    if (Array.isArray(cloudSlots) && cloudSlots.some(Boolean)) {
-                        setSlots(cloudSlots);
-                        localStorage.setItem('praise_flow_slots', JSON.stringify(cloudSlots));
-                        if (!silent) showToast("☁️ 클라우드에서 예배 순서를 성공적으로 불러왔습니다!");
+                    let targetSlots = null;
+
+                    // 0. MQTT 큐시트 동기화 시그널 전송
+                    if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
+                        try {
+                            sendMqttSignal('REQUEST_SLOTS_SYNC');
+                        } catch(mErr) {}
                     }
+
+                    // 1. Vercel Serverless Sync API 클라우드 큐시트 데이터 조회
+                    try {
+                        const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId + '&t=' + Date.now();
+                        const apiRes = await fetch(syncApiUrl);
+                        if (apiRes.ok) {
+                            const apiData = await apiRes.json();
+                            if (apiData && Array.isArray(apiData.slots) && apiData.slots.some(Boolean)) {
+                                targetSlots = apiData.slots;
+                            }
+                        }
+                    } catch (apiErr) {
+                        console.warn("Vercel Sync API slots fetch warn:", apiErr);
+                    }
+
+                    // 2. Supabase 클라우드 스냅샷 조회
+                    if (!targetSlots && supabase) {
+                        try {
+                            const { data: supaSlotsData } = await supabase
+                                .from('praise_history')
+                                .select('slots_data')
+                                .or(`channel_id.eq.${channelId},channel_id.eq.praise_main_channel,channel_id.eq.default`)
+                                .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+
+                            if (supaSlotsData && supaSlotsData.length > 0 && Array.isArray(supaSlotsData[0].slots_data)) {
+                                targetSlots = supaSlotsData[0].slots_data;
+                            }
+                        } catch (supaErr) {
+                            console.warn("Supabase slots fetch warn:", supaErr);
+                        }
+                    }
+
+                    // 3. REST API 조회
+                    if (!targetSlots) {
+                        try {
+                            targetSlots = await fetchCloudData(CLOUD_SLOTS_URL, 'slots');
+                        } catch(rErr) {}
+                    }
+
+                    if (Array.isArray(targetSlots) && targetSlots.some(Boolean)) {
+                        setSlots(targetSlots);
+                        localStorage.setItem('praise_flow_slots', JSON.stringify(targetSlots));
+                        if (!silent) showToast(`☁️ 클라우드에서 최신 예배 순서 큐시트(${targetSlots.filter(Boolean).length}곡)를 불러왔습니다!`);
+                        return;
+                    }
+                    if (!silent) showToast("⚠️ 클라우드에서 예배 순서 큐시트 데이터를 읽지 못했습니다.");
                 } catch (err) {
                     console.warn("Slots DB 로드 예외 보완:", err);
                 } finally {
@@ -1004,25 +1060,69 @@
                 }
             };
 
-            // DB에 큐시트(slots) 저장하기
+            // DB에 큐시트(slots) 저장하기 (Vercel Serverless Sync + Supabase + REST + MQTT)
             const saveSlotsToDB = async (newSlots) => {
-                if (!dbSyncEnabled) return;
+                const targetSlots = newSlots || slots;
                 try {
-                    const cleaned = newSlots.map(slot => {
+                    const cleaned = (targetSlots || []).map(slot => {
                         if (!slot) return null;
                         return {
                             song: {
-                                title: slot.song.title,
-                                lyrics: slot.song.lyrics,
-                                youtubeUrl: slot.song.youtubeUrl || '',
-                                youtubeMrUrl: slot.song.youtubeMrUrl || ''
+                                title: slot.song ? slot.song.title : '',
+                                lyrics: slot.song ? slot.song.lyrics : '',
+                                youtubeUrl: slot.song ? (slot.song.youtubeUrl || '') : '',
+                                youtubeMrUrl: slot.song ? (slot.song.youtubeMrUrl || '') : ''
                             },
-                            themeUrl: slot.themeUrl
+                            themeUrl: slot.themeUrl || null
                         };
                     });
 
-                    await saveCloudData(CLOUD_SLOTS_URL, 'praiseflow_slots_master', 'slots', cleaned);
+                    // 1. Vercel Serverless Sync API 클라우드 큐시트 업로드
+                    try {
+                        const syncApiUrl = 'https://praiseflow.vercel.app/api/sync?channel=' + channelId;
+                        await fetch(syncApiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ slots: cleaned })
+                        });
+                    } catch (vErr) {
+                        console.warn("Vercel Sync API slots upload warn:", vErr);
+                    }
+
+                    // 2. Supabase 클라우드 스냅샷 저장
+                    if (supabase) {
+                        const targetChannels = Array.from(new Set([channelId, 'praise_main_channel', 'default']));
+                        for (const chId of targetChannels) {
+                            try {
+                                const { data: existSnap } = await supabase
+                                    .from('praise_history')
+                                    .select('id')
+                                    .eq('channel_id', chId)
+                                    .eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+
+                                if (existSnap && existSnap.length > 0) {
+                                    await supabase.from('praise_history').update({
+                                        slots_data: cleaned,
+                                        updated_at: new Date().toISOString()
+                                    }).eq('channel_id', chId).eq('event_date', 'CURRENT_SLOTS_SNAPSHOT');
+                                } else {
+                                    await supabase.from('praise_history').insert({
+                                        channel_id: chId,
+                                        event_date: 'CURRENT_SLOTS_SNAPSHOT',
+                                        slots_data: cleaned,
+                                        updated_at: new Date().toISOString()
+                                    });
+                                }
+                            } catch (sErr) {
+                                console.warn("Supabase slots upload warn:", sErr);
+                            }
+                        }
+                    }
+
+                    // 3. REST API & MQTT 전송
+                    saveCloudData(CLOUD_SLOTS_URL, 'praiseflow_slots_master', 'slots', cleaned);
                     sendMqttSignal('SYNC_FULL_SLOTS_PAYLOAD', cleaned);
+                    localStorage.setItem('praise_flow_slots', JSON.stringify(cleaned));
                 } catch (e) {
                     console.warn("Slots DB 저장 예외 보완:", e);
                 }
@@ -2158,7 +2258,7 @@
                     <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'30px', flexWrap:'wrap', gap:'15px'}}>
                         <h1 style={{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'}}>
                             <i data-lucide="music" style={{color:'var(--primary)'}}></i> PraiseFlow <span style={{fontSize:'1rem', opacity:0.6}}>PRO</span>
-                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.5.9</span>
+                            <span style={{fontSize:'0.75rem', background:'rgba(192, 132, 252, 0.15)', border:'1px solid rgba(192, 132, 252, 0.3)', color:'var(--primary)', padding:'3px 8px', borderRadius:'12px', fontWeight:800}}>v1.6.0</span>
                             <span style={{
                                 fontSize:'0.75rem', 
                                 background: isSyncing ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.15)', 

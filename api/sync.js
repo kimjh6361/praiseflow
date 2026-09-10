@@ -20,13 +20,23 @@ export default async function handler(req, res) {
   if (req.method === 'POST') {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      if (body && (body.library || typeof body === 'object')) {
-        const lib = body.library || body;
-        memoryStore[channel] = {
-          library: lib,
-          updatedAt: Date.now()
-        };
-        return res.status(200).json({ success: true, count: Object.keys(lib).length, channel });
+      if (body && typeof body === 'object') {
+        if (!memoryStore[channel]) {
+          memoryStore[channel] = { library: {}, slots: [], updatedAt: Date.now() };
+        }
+        if (body.library !== undefined) {
+          memoryStore[channel].library = body.library;
+        }
+        if (body.slots !== undefined) {
+          memoryStore[channel].slots = body.slots;
+        }
+        memoryStore[channel].updatedAt = Date.now();
+        return res.status(200).json({
+          success: true,
+          channel,
+          libraryCount: Object.keys(memoryStore[channel].library || {}).length,
+          slotsCount: (memoryStore[channel].slots || []).filter(Boolean).length
+        });
       }
       return res.status(400).json({ success: false, error: 'Invalid payload' });
     } catch (e) {
@@ -36,10 +46,10 @@ export default async function handler(req, res) {
 
   if (req.method === 'GET') {
     const stored = memoryStore[channel];
-    if (stored && stored.library) {
+    if (stored) {
       return res.status(200).json(stored);
     }
-    return res.status(200).json({ library: {}, updatedAt: 0 });
+    return res.status(200).json({ library: {}, slots: [], updatedAt: 0 });
   }
 
   return res.status(405).end();
